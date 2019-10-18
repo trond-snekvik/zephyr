@@ -1345,8 +1345,8 @@ static void mod_sub_add(struct bt_mesh_model *model,
 	struct bt_mesh_elem *elem;
 	u8_t *mod_id;
 	u8_t status;
+	u16_t *entry;
 	bool vnd;
-	int i;
 
 	elem_addr = net_buf_simple_pull_le16(buf);
 	if (!BT_MESH_ADDR_IS_UNICAST(elem_addr)) {
@@ -1379,33 +1379,30 @@ static void mod_sub_add(struct bt_mesh_model *model,
 		goto send_status;
 	}
 
-	if (bt_mesh_model_find_group(mod, sub_addr)) {
+	if (bt_mesh_model_find_group(mod, vnd, sub_addr)) {
 		/* Tried to add existing subscription */
 		BT_DBG("found existing subscription");
 		status = STATUS_SUCCESS;
 		goto send_status;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(mod->groups); i++) {
-		if (mod->groups[i] == BT_MESH_ADDR_UNASSIGNED) {
-			mod->groups[i] = sub_addr;
-			break;
-		}
-	}
-
-	if (i == ARRAY_SIZE(mod->groups)) {
+	entry = bt_mesh_model_find_group(mod, vnd, BT_MESH_ADDR_UNASSIGNED);
+	if (!entry) {
 		status = STATUS_INSUFF_RESOURCES;
-	} else {
-		status = STATUS_SUCCESS;
-
-		if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
-			bt_mesh_store_mod_sub(mod);
-		}
-
-		if (IS_ENABLED(CONFIG_BT_MESH_LOW_POWER)) {
-			bt_mesh_lpn_group_add(sub_addr);
-		}
+		goto send_status;
 	}
+
+	*entry = sub_addr;
+	status = STATUS_SUCCESS;
+
+	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
+		bt_mesh_store_mod_sub(mod);
+	}
+
+	if (IS_ENABLED(CONFIG_BT_MESH_LOW_POWER)) {
+		bt_mesh_lpn_group_add(sub_addr);
+	}
+
 
 send_status:
 	send_mod_sub_status(model, ctx, status, elem_addr, sub_addr,
@@ -1464,7 +1461,7 @@ static void mod_sub_del(struct bt_mesh_model *model,
 		bt_mesh_lpn_group_del(&sub_addr, 1);
 	}
 
-	match = bt_mesh_model_find_group(mod, sub_addr);
+	match = bt_mesh_model_find_group(mod, vnd, sub_addr);
 	if (match) {
 		*match = BT_MESH_ADDR_UNASSIGNED;
 
@@ -1476,6 +1473,12 @@ static void mod_sub_del(struct bt_mesh_model *model,
 send_status:
 	send_mod_sub_status(model, ctx, status, elem_addr, sub_addr,
 			    mod_id, vnd);
+}
+
+static bool mod_sub_clear_visitor(struct bt_mesh_model *mod, void *ctx)
+{
+	mod_sub_list_clear(mod);
+	return true;
 }
 
 static void mod_sub_overwrite(struct bt_mesh_model *model,
@@ -1520,13 +1523,9 @@ static void mod_sub_overwrite(struct bt_mesh_model *model,
 		goto send_status;
 	}
 
-	if (IS_ENABLED(CONFIG_BT_MESH_LOW_POWER)) {
-		bt_mesh_lpn_group_del(mod->groups, ARRAY_SIZE(mod->groups));
-	}
-
-	mod_sub_list_clear(mod);
-
 	if (ARRAY_SIZE(mod->groups) > 0) {
+		bt_mesh_model_tree_elem(mod, vnd, mod_sub_clear_visitor, NULL);
+
 		mod->groups[0] = sub_addr;
 		status = STATUS_SUCCESS;
 
@@ -1540,7 +1539,6 @@ static void mod_sub_overwrite(struct bt_mesh_model *model,
 	} else {
 		status = STATUS_INSUFF_RESOURCES;
 	}
-
 
 send_status:
 	send_mod_sub_status(model, ctx, status, elem_addr, sub_addr,
@@ -1582,11 +1580,7 @@ static void mod_sub_del_all(struct bt_mesh_model *model,
 		goto send_status;
 	}
 
-	if (IS_ENABLED(CONFIG_BT_MESH_LOW_POWER)) {
-		bt_mesh_lpn_group_del(mod->groups, ARRAY_SIZE(mod->groups));
-	}
-
-	mod_sub_list_clear(mod);
+	bt_mesh_model_tree_elem(mod, vnd, mod_sub_clear_visitor, NULL);
 
 	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
 		bt_mesh_store_mod_sub(mod);
@@ -1599,16 +1593,30 @@ send_status:
 			    BT_MESH_ADDR_UNASSIGNED, mod_id, vnd);
 }
 
+static bool mod_sub_list_visitor(struct bt_mesh_model *mod, void *ctx)
+{
+	struct net_buf_simple *msg = ctx;
+	int i;
+
+	for (i = 0;
+	     i < ARRAY_SIZE(mod->groups) && net_buf_simple_tailroom(msg) > 6;
+	     i++) {
+		if (mod->groups[i] != BT_MESH_ADDR_UNASSIGNED) {
+			net_buf_simple_add_le16(msg, mod->groups[i]);
+		}
+	}
+
+	return net_buf_simple_tailroom(msg) > 6;
+}
+
 static void mod_sub_get(struct bt_mesh_model *model,
 			struct bt_mesh_msg_ctx *ctx,
 			struct net_buf_simple *buf)
 {
-	BT_MESH_MODEL_BUF_DEFINE(msg, OP_MOD_SUB_LIST,
-				 5 + CONFIG_BT_MESH_MODEL_GROUP_COUNT * 2);
+	NET_BUF_SIMPLE_DEFINE(msg, BT_MESH_TX_SDU_MAX);
 	struct bt_mesh_model *mod;
 	struct bt_mesh_elem *elem;
 	u16_t addr, id;
-	int i;
 
 	addr = net_buf_simple_pull_le16(buf);
 	if (!BT_MESH_ADDR_IS_UNICAST(addr)) {
@@ -1643,11 +1651,7 @@ static void mod_sub_get(struct bt_mesh_model *model,
 	net_buf_simple_add_le16(&msg, addr);
 	net_buf_simple_add_le16(&msg, id);
 
-	for (i = 0; i < ARRAY_SIZE(mod->groups); i++) {
-		if (mod->groups[i] != BT_MESH_ADDR_UNASSIGNED) {
-			net_buf_simple_add_le16(&msg, mod->groups[i]);
-		}
-	}
+	bt_mesh_model_tree_elem(mod, false, mod_sub_list_visitor, &msg);
 
 send_list:
 	if (bt_mesh_model_send(model, ctx, &msg, NULL, NULL)) {
@@ -1659,12 +1663,10 @@ static void mod_sub_get_vnd(struct bt_mesh_model *model,
 			    struct bt_mesh_msg_ctx *ctx,
 			    struct net_buf_simple *buf)
 {
-	BT_MESH_MODEL_BUF_DEFINE(msg, OP_MOD_SUB_LIST_VND,
-				 7 + CONFIG_BT_MESH_MODEL_GROUP_COUNT * 2);
+	NET_BUF_SIMPLE_DEFINE(msg, BT_MESH_TX_SDU_MAX);
 	struct bt_mesh_model *mod;
 	struct bt_mesh_elem *elem;
 	u16_t company, addr, id;
-	int i;
 
 	addr = net_buf_simple_pull_le16(buf);
 	if (!BT_MESH_ADDR_IS_UNICAST(addr)) {
@@ -1703,11 +1705,7 @@ static void mod_sub_get_vnd(struct bt_mesh_model *model,
 	net_buf_simple_add_le16(&msg, company);
 	net_buf_simple_add_le16(&msg, id);
 
-	for (i = 0; i < ARRAY_SIZE(mod->groups); i++) {
-		if (mod->groups[i] != BT_MESH_ADDR_UNASSIGNED) {
-			net_buf_simple_add_le16(&msg, mod->groups[i]);
-		}
-	}
+	bt_mesh_model_tree_elem(mod, true, mod_sub_list_visitor, &msg);
 
 send_list:
 	if (bt_mesh_model_send(model, ctx, &msg, NULL, NULL)) {
@@ -1761,7 +1759,7 @@ static void mod_sub_va_add(struct bt_mesh_model *model,
 		goto send_status;
 	}
 
-	if (bt_mesh_model_find_group(mod, sub_addr)) {
+	if (bt_mesh_model_find_group(mod, vnd, sub_addr)) {
 		/* Tried to add existing subscription */
 		status = STATUS_SUCCESS;
 		goto send_status;
@@ -1843,7 +1841,7 @@ static void mod_sub_va_del(struct bt_mesh_model *model,
 		bt_mesh_lpn_group_del(&sub_addr, 1);
 	}
 
-	match = bt_mesh_model_find_group(mod, sub_addr);
+	match = bt_mesh_model_find_group(mod, vnd, sub_addr);
 	if (match) {
 		*match = BT_MESH_ADDR_UNASSIGNED;
 
@@ -1899,13 +1897,11 @@ static void mod_sub_va_overwrite(struct bt_mesh_model *model,
 		goto send_status;
 	}
 
-	if (IS_ENABLED(CONFIG_BT_MESH_LOW_POWER)) {
-		bt_mesh_lpn_group_del(mod->groups, ARRAY_SIZE(mod->groups));
-	}
-
-	mod_sub_list_clear(mod);
 
 	if (ARRAY_SIZE(mod->groups) > 0) {
+		bt_mesh_model_tree_elem(mod, false, mod_sub_clear_visitor,
+					NULL);
+
 		status = va_add(label_uuid, &sub_addr);
 		if (status == STATUS_SUCCESS) {
 			mod->groups[0] = sub_addr;

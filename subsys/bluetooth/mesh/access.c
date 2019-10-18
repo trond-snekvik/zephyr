@@ -29,11 +29,11 @@
 
 static const struct bt_mesh_comp *dev_comp;
 static u16_t dev_primary_addr;
+static u8_t tree_id;
 
 void bt_mesh_model_foreach(void (*func)(struct bt_mesh_model *mod,
-					struct bt_mesh_elem *elem,
-					bool vnd, bool primary,
-					void *user_data),
+					struct bt_mesh_elem *elem, bool vnd,
+					bool primary, void *user_data),
 			   void *user_data)
 {
 	int i, j;
@@ -189,9 +189,8 @@ static int publish_retransmit(struct bt_mesh_model *mod)
 
 static void mod_publish(struct k_work *work)
 {
-	struct bt_mesh_model_pub *pub = CONTAINER_OF(work,
-						     struct bt_mesh_model_pub,
-						     timer.work);
+	struct bt_mesh_model_pub *pub =
+		CONTAINER_OF(work, struct bt_mesh_model_pub, timer.work);
 	s32_t period_ms;
 	int err;
 
@@ -320,8 +319,8 @@ void bt_mesh_comp_provision(u16_t addr)
 
 		elem->addr = addr++;
 
-		BT_DBG("addr 0x%04x mod_count %u vnd_mod_count %u",
-		       elem->addr, elem->model_count, elem->vnd_model_count);
+		BT_DBG("addr 0x%04x mod_count %u vnd_mod_count %u", elem->addr,
+		       elem->model_count, elem->vnd_model_count);
 	}
 }
 
@@ -339,7 +338,7 @@ u16_t bt_mesh_primary_addr(void)
 	return dev_primary_addr;
 }
 
-u16_t *bt_mesh_model_find_group(struct bt_mesh_model *mod, u16_t addr)
+static u16_t *model_group_get(struct bt_mesh_model *mod, u16_t addr)
 {
 	int i;
 
@@ -352,6 +351,54 @@ u16_t *bt_mesh_model_find_group(struct bt_mesh_model *mod, u16_t addr)
 	return NULL;
 }
 
+void bt_mesh_model_tree_elem(struct bt_mesh_model *mod, bool vnd,
+			     bool (*cb)(struct bt_mesh_model *mod, void *ctx),
+			     void *ctx)
+{
+	struct bt_mesh_elem *elem = &dev_comp->elem[mod->elem_idx];
+	struct bt_mesh_model *models = vnd ? elem->vnd_models : elem->models;
+	u8_t model_count = vnd ? elem->vnd_model_count : elem->model_count;
+	bool cont = true;
+	u8_t i;
+
+	if (mod->tree_id == 0) {
+		cb(mod, ctx);
+		return;
+	}
+
+	for (i = 0; i < model_count && cont; i++) {
+		if (mod->tree_id == models[i].tree_id) {
+			cont = cb(mod, ctx);
+		}
+	}
+}
+
+struct find_group_ctx {
+	u16_t addr;
+	u16_t *entry;
+};
+
+static bool find_group_visitor(struct bt_mesh_model *mod, void *ctx)
+{
+	struct find_group_ctx *find = ctx;
+
+	find->entry = model_group_get(mod, find->addr);
+
+	return !find->entry;
+}
+
+u16_t *bt_mesh_model_find_group(struct bt_mesh_model *mod, bool vnd, u16_t addr)
+{
+	struct find_group_ctx ctx = {
+		.addr = addr,
+		.entry = NULL,
+	};
+
+	bt_mesh_model_tree_elem(mod, vnd, find_group_visitor, &ctx);
+
+	return ctx.entry;
+}
+
 static struct bt_mesh_model *bt_mesh_elem_find_group(struct bt_mesh_elem *elem,
 						     u16_t group_addr)
 {
@@ -362,7 +409,7 @@ static struct bt_mesh_model *bt_mesh_elem_find_group(struct bt_mesh_elem *elem,
 	for (i = 0; i < elem->model_count; i++) {
 		model = &elem->models[i];
 
-		match = bt_mesh_model_find_group(model, group_addr);
+		match = model_group_get(model, group_addr);
 		if (match) {
 			return model;
 		}
@@ -371,7 +418,7 @@ static struct bt_mesh_model *bt_mesh_elem_find_group(struct bt_mesh_elem *elem,
 	for (i = 0; i < elem->vnd_model_count; i++) {
 		model = &elem->vnd_models[i];
 
-		match = bt_mesh_model_find_group(model, group_addr);
+		match = model_group_get(model, group_addr);
 		if (match) {
 			return model;
 		}
@@ -422,9 +469,19 @@ static bool model_has_key(struct bt_mesh_model *mod, u16_t key)
 	return false;
 }
 
+static bool model_has_dst(struct bt_mesh_model *mod, bool vnd, u16_t dst)
+{
+	if (BT_MESH_ADDR_IS_UNICAST(dst)) {
+		return (dev_comp->elem[mod->elem_idx].addr == dst);
+	} else if (BT_MESH_ADDR_IS_GROUP(dst) || BT_MESH_ADDR_IS_VIRTUAL(dst)) {
+		return bt_mesh_model_find_group(mod, vnd, dst);
+	}
+
+	return (mod->elem_idx == 0 && bt_mesh_fixed_group_match(dst));
+}
+
 static const struct bt_mesh_model_op *find_op(struct bt_mesh_model *models,
-					      u8_t model_count, u16_t dst,
-					      u16_t app_idx, u32_t opcode,
+					      u8_t model_count, u32_t opcode,
 					      struct bt_mesh_model **model)
 {
 	u8_t i;
@@ -433,17 +490,6 @@ static const struct bt_mesh_model_op *find_op(struct bt_mesh_model *models,
 		const struct bt_mesh_model_op *op;
 
 		*model = &models[i];
-
-		if (BT_MESH_ADDR_IS_GROUP(dst) ||
-		    BT_MESH_ADDR_IS_VIRTUAL(dst)) {
-			if (!bt_mesh_model_find_group(*model, dst)) {
-				continue;
-			}
-		}
-
-		if (!model_has_key(*model, app_idx)) {
-			continue;
-		}
 
 		for (op = (*model)->op; op->func; op++) {
 			if (op->opcode == opcode) {
@@ -528,53 +574,47 @@ void bt_mesh_model_recv(struct bt_mesh_net_rx *rx, struct net_buf_simple *buf)
 
 	for (i = 0; i < dev_comp->elem_count; i++) {
 		struct bt_mesh_elem *elem = &dev_comp->elem[i];
-
-		if (BT_MESH_ADDR_IS_UNICAST(rx->ctx.recv_dst)) {
-			if (elem->addr != rx->ctx.recv_dst) {
-				continue;
-			}
-		} else if (BT_MESH_ADDR_IS_GROUP(rx->ctx.recv_dst) ||
-			   BT_MESH_ADDR_IS_VIRTUAL(rx->ctx.recv_dst)) {
-			/* find_op() will do proper model/group matching */
-		} else if (i != 0 ||
-			   !bt_mesh_fixed_group_match(rx->ctx.recv_dst)) {
-			continue;
-		}
+		struct net_buf_simple_state state;
+		bool vnd = (BT_MESH_MODEL_OP_LEN(opcode) == 3);
 
 		/* SIG models cannot contain 3-byte (vendor) OpCodes, and
 		 * vendor models cannot contain SIG (1- or 2-byte) OpCodes, so
 		 * we only need to do the lookup in one of the model lists.
 		 */
-		if (opcode < 0x10000) {
-			models = elem->models;
-			count = elem->model_count;
-		} else {
+		if (vnd) {
 			models = elem->vnd_models;
 			count = elem->vnd_model_count;
-		}
-
-		op = find_op(models, count, rx->ctx.recv_dst, rx->ctx.app_idx,
-			     opcode, &model);
-		if (op) {
-			struct net_buf_simple_state state;
-
-			if (buf->len < op->min_len) {
-				BT_ERR("Too short message for OpCode 0x%08x",
-				       opcode);
-				continue;
-			}
-
-			/* The callback will likely parse the buffer, so
-			 * store the parsing state in case multiple models
-			 * receive the message.
-			 */
-			net_buf_simple_save(buf, &state);
-			op->func(model, &rx->ctx, buf);
-			net_buf_simple_restore(buf, &state);
-
 		} else {
-			BT_DBG("No OpCode 0x%08x for elem %d", opcode, i);
+			models = elem->models;
+			count = elem->model_count;
 		}
+
+		op = find_op(models, count, opcode, &model);
+		if (!op) {
+			BT_DBG("No OpCode 0x%08x for elem %d", opcode, i);
+			continue;
+		}
+
+		if (!model_has_key(model, rx->ctx.app_idx)) {
+			continue;
+		}
+
+		if (!model_has_dst(model, vnd, rx->ctx.recv_dst)) {
+			continue;
+		}
+
+		if (buf->len < op->min_len) {
+			BT_ERR("Too short message for OpCode 0x%08x", opcode);
+			continue;
+		}
+
+		/* The callback will likely parse the buffer, so
+		 * store the parsing state in case multiple models
+		 * receive the message.
+		 */
+		net_buf_simple_save(buf, &state);
+		op->func(model, &rx->ctx, buf);
+		net_buf_simple_restore(buf, &state);
 	}
 }
 
@@ -599,9 +639,8 @@ void bt_mesh_model_msg_init(struct net_buf_simple *msg, u32_t opcode)
 	}
 }
 
-static int model_send(struct bt_mesh_model *model,
-		      struct bt_mesh_net_tx *tx, bool implicit_bind,
-		      struct net_buf_simple *msg,
+static int model_send(struct bt_mesh_model *model, struct bt_mesh_net_tx *tx,
+		      bool implicit_bind, struct net_buf_simple *msg,
 		      const struct bt_mesh_send_cb *cb, void *cb_data)
 {
 	BT_DBG("net_idx 0x%04x app_idx 0x%04x dst 0x%04x", tx->ctx->net_idx,
@@ -631,8 +670,7 @@ static int model_send(struct bt_mesh_model *model,
 	return bt_mesh_trans_send(tx, msg, cb, cb_data);
 }
 
-int bt_mesh_model_send(struct bt_mesh_model *model,
-		       struct bt_mesh_msg_ctx *ctx,
+int bt_mesh_model_send(struct bt_mesh_model *model, struct bt_mesh_msg_ctx *ctx,
 		       struct net_buf_simple *msg,
 		       const struct bt_mesh_send_cb *cb, void *cb_data)
 {
@@ -652,8 +690,7 @@ int bt_mesh_model_publish(struct bt_mesh_model *model)
 	NET_BUF_SIMPLE_DEFINE(sdu, BT_MESH_TX_SDU_MAX);
 	struct bt_mesh_model_pub *pub = model->pub;
 	struct bt_mesh_app_key *key;
-	struct bt_mesh_msg_ctx ctx = {
-	};
+	struct bt_mesh_msg_ctx ctx = {};
 	struct bt_mesh_net_tx tx = {
 		.ctx = &ctx,
 		.src = bt_mesh_model_elem(model)->addr,
@@ -745,4 +782,42 @@ struct bt_mesh_model *bt_mesh_model_find(const struct bt_mesh_elem *elem,
 const struct bt_mesh_comp *bt_mesh_comp_get(void)
 {
 	return dev_comp;
+}
+
+struct tree_id_ctx {
+	u8_t old;
+	u8_t new;
+};
+
+static void model_update_tree_id(struct bt_mesh_model *mod,
+				 struct bt_mesh_elem *elem, bool vnd,
+				 bool primary, void *ctx)
+{
+	struct tree_id_ctx *tree_id = ctx;
+
+	if (mod->tree_id == tree_id->old) {
+		mod->tree_id = tree_id->new;
+	}
+}
+
+int bt_mesh_model_extend(struct bt_mesh_model *mod,
+			 struct bt_mesh_model *base_mod)
+{
+	struct tree_id_ctx ctx;
+
+	if (mod->tree_id == 0) {
+		mod->tree_id = ++tree_id;
+	}
+
+	if (base_mod->tree_id == 0) {
+		base_mod->tree_id = mod->tree_id;
+		return 0;
+	}
+
+	ctx.old = base_mod->tree_id;
+	ctx.new = mod->tree_id;
+
+	bt_mesh_model_foreach(model_update_tree_id, &ctx);
+
+	return 0;
 }

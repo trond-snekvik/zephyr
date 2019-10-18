@@ -493,9 +493,10 @@ struct bt_mesh_model {
 	};
 
 	/* Internal information, mainly for persistent storage */
-	u8_t  elem_idx;   /* Belongs to Nth element */
-	u8_t  mod_idx;    /* Is the Nth model in the element */
-	u16_t flags;      /* Information about what has changed */
+	u8_t elem_idx;    /* Belongs to Nth element */
+	u8_t mod_idx;     /* Is the Nth model in the element */
+	u8_t flags;       /* Information about what has changed */
+	u8_t tree_id;     /* Model tree ID. */
 
 	/* Model Publication */
 	struct bt_mesh_model_pub * const pub;
@@ -510,6 +511,7 @@ struct bt_mesh_model {
 
 	/* Model callback structure. */
 	const struct bt_mesh_model_cb * const cb;
+
 
 	/* Model-specific user data */
 	void *user_data;
@@ -615,6 +617,22 @@ static inline bool bt_mesh_model_in_primary(const struct bt_mesh_model *mod)
  */
 int bt_mesh_model_data_store(struct bt_mesh_model *mod, bool vnd,
 			     const void *data, size_t data_len);
+
+/** @brief Notify the access layer that a model extends another.
+ *
+ * A Mesh model may extend any number of models, in any element. This function
+ * should only be called on immediately extended models. If @p base_mod is
+ * already an extension of other models, @p mod will implicitly extend these as
+ * well.
+ *
+ * @param[in] mod Mesh model.
+ * @param[in] base_mod The model being extended.
+ *
+ * @retval 0 Successfully extended the base_mod model.
+ * @retval -EALREADY The base_mod model is already extended.
+ */
+int bt_mesh_model_extend(struct bt_mesh_model *mod,
+			 struct bt_mesh_model *base_mod);
 
 /** Node Composition */
 struct bt_mesh_comp {

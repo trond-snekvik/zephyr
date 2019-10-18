@@ -1279,7 +1279,7 @@ static void store_pending_mod_sub(struct bt_mesh_model *mod, bool vnd)
 	char path[20];
 	int i, count, err;
 
-	for (i = 0, count = 0; i < ARRAY_SIZE(mod->groups); i++) {
+	for (i = 0, count = 0; i < CONFIG_BT_MESH_MODEL_GROUP_COUNT; i++) {
 		if (mod->groups[i] != BT_MESH_ADDR_UNASSIGNED) {
 			groups[count++] = mod->groups[i];
 		}
@@ -1576,6 +1576,10 @@ void bt_mesh_store_mod_bind(struct bt_mesh_model *mod)
 
 void bt_mesh_store_mod_sub(struct bt_mesh_model *mod)
 {
+	if (mod->flags & BT_MESH_MOD_EXTENDED) {
+		return;
+	}
+
 	mod->flags |= BT_MESH_MOD_SUB_PENDING;
 	schedule_store(BT_MESH_MOD_PENDING);
 }
