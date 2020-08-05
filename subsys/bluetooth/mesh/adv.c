@@ -34,8 +34,8 @@
 #define ADV_SCAN_UNIT(_ms) ((_ms) * 8 / 5)
 
 /* Window and Interval are equal for continuous scanning */
-#define MESH_SCAN_INTERVAL_MS 30
-#define MESH_SCAN_WINDOW_MS   30
+#define MESH_SCAN_INTERVAL_MS CONFIG_BT_MESH_SCAN_INTERVAL
+#define MESH_SCAN_WINDOW_MS   CONFIG_BT_MESH_SCAN_WINDOW
 #define MESH_SCAN_INTERVAL    ADV_SCAN_UNIT(MESH_SCAN_INTERVAL_MS)
 #define MESH_SCAN_WINDOW      ADV_SCAN_UNIT(MESH_SCAN_WINDOW_MS)
 
@@ -95,9 +95,17 @@ static inline void adv_send(struct net_buf *buf)
 
 	adv_int = MAX(adv_int_min,
 		      BT_MESH_TRANSMIT_INT(BT_MESH_ADV(buf)->xmit));
-	duration = (MESH_SCAN_WINDOW_MS +
-		    ((BT_MESH_TRANSMIT_COUNT(BT_MESH_ADV(buf)->xmit) + 1) *
-		     (adv_int + 10)));
+	/* A single advertisement interval takes adv_int + (rand() % 10) ms,
+	 * and starts after some configurable switching delay. To send multiple
+	 * retransmits of the same packet, we'll setup a timer that runs for
+	 * a long enough time to allow the controller to send all our
+	 * advertisements, plus a delay to ensure that the next packet doesn't
+	 * start immediately after.
+	 */
+	duration = (CONFIG_BT_MESH_ADV_DELAY +
+		    (BT_MESH_TRANSMIT_COUNT(BT_MESH_ADV(buf)->xmit) *
+		     (adv_int + 10)) +
+		    adv_int);
 
 	BT_DBG("type %u len %u: %s", BT_MESH_ADV(buf)->type,
 	       buf->len, bt_hex(buf->data, buf->len));

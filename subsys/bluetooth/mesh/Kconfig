@@ -203,6 +203,32 @@ config BT_MESH_ADV_STACK_SIZE
 	  NOTE: This is an advanced setting and should not be changed unless
 	  absolutely necessary
 
+config BT_MESH_ADV_DELAY
+	int "Mesh advertiser startup delay"
+	default 0 if BT_LL_SW_SPLIT
+	default BT_MESH_SCAN_INTERVAL
+	help
+	  Expected delay (in milliseconds) from when the mesh orders an
+	  advertisement until the controller starts sending, when in scan mode.
+	  The delay will be added to the advertising timer.
+
+config BT_MESH_SCAN_INTERVAL
+	int "Mesh scan interval"
+	default 100 if BT_LL_SW_SPLIT
+	default 30
+	range 20 10240
+	help
+	  Bluetooth scan interval used by the Bluetooth Mesh subsystem (in
+	  milliseconds)
+
+config BT_MESH_SCAN_WINDOW
+	int "Mesh scan window"
+	default BT_MESH_SCAN_INTERVAL
+	range 20 BT_MESH_SCAN_INTERVAL
+	help
+	  Bluetooth scan window used by the Bluetooth Mesh subsystem (in
+	  milliseconds)
+
 config BT_MESH_IVU_DIVIDER
 	int "Divider for IV Update state refresh timer"
 	default 4
