@@ -403,6 +403,14 @@ void bt_mesh_iv_update_test(bool enable);
  */
 bool bt_mesh_iv_update(void);
 
+/** @brief Get the current IV index.
+ *
+ *  Read the current IV index used for transmitting.
+ *
+ *  @return The current IV index.
+ */
+uint32_t bt_mesh_iv_index_get(void);
+
 /** @brief Toggle the Low Power feature of the local device
  *
  *  Enables or disables the Low Power feature of the local device. This is

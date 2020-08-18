@@ -133,16 +133,6 @@ struct label *get_label(uint16_t index);
 
 uint8_t *bt_mesh_label_uuid_get(uint16_t addr);
 
-struct bt_mesh_cfg_srv *bt_mesh_cfg_get(void);
-
-uint8_t bt_mesh_net_transmit_get(void);
-uint8_t bt_mesh_relay_get(void);
-uint8_t bt_mesh_friend_get(void);
-uint8_t bt_mesh_relay_retransmit_get(void);
-uint8_t bt_mesh_beacon_get(void);
-uint8_t bt_mesh_gatt_proxy_get(void);
-uint8_t bt_mesh_default_ttl_get(void);
-
 void bt_mesh_subnet_del(struct bt_mesh_subnet *sub, bool store);
 
 struct bt_mesh_app_key *bt_mesh_app_key_alloc(uint16_t app_idx);

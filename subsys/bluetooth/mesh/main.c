@@ -324,6 +324,7 @@ int bt_mesh_init(const struct bt_mesh_prov *prov,
 		}
 	}
 
+	bt_mesh_cfg_init();
 	bt_mesh_net_init();
 	bt_mesh_trans_init();
 	bt_mesh_hb_init();

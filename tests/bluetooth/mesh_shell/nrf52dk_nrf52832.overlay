@@ -1,0 +1,13 @@
+// &wow {
+// 	hello;
+// };
+
+// &spi0 {
+// 	wow: hey {
+// 		compatible = "bosch,bme280";
+// 		reg = < 1 >;
+// 		status = "okay";
+// 		label = "hello";
+// 		spi-max-frequency = < 1000 >;
+// 	};
+// };

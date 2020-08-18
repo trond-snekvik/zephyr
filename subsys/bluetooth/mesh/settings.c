@@ -157,14 +157,6 @@ static struct node_update cdb_node_updates[0];
 static struct key_update cdb_key_updates[0];
 #endif
 
-/* We need this so we don't overwrite app-hardcoded values in case FCB
- * contains a history of changes but then has a NULL at the end.
- */
-static struct {
-	bool valid;
-	struct cfg_val cfg;
-} stored_cfg;
-
 static inline int mesh_x_set(settings_read_cb read_cb, void *cb_arg, void *out,
 			     size_t read_len)
 {
@@ -529,28 +521,28 @@ static int hb_pub_set(const char *name, size_t len_rd,
 static int cfg_set(const char *name, size_t len_rd,
 		   settings_read_cb read_cb, void *cb_arg)
 {
-	struct bt_mesh_cfg_srv *cfg = bt_mesh_cfg_get();
+	struct cfg_val cfg;
 	int err;
 
-	if (!cfg) {
-		return -ENOENT;
-	}
-
 	if (len_rd == 0) {
-		stored_cfg.valid = false;
 		BT_DBG("Cleared configuration state");
 		return 0;
 	}
 
-
-	err = mesh_x_set(read_cb, cb_arg, &stored_cfg.cfg,
-			 sizeof(stored_cfg.cfg));
+	err = mesh_x_set(read_cb, cb_arg, &cfg, sizeof(cfg));
 	if (err) {
 		BT_ERR("Failed to set \'cfg\'");
 		return err;
 	}
 
-	stored_cfg.valid = true;
+	bt_mesh_net_transmit_set(cfg.net_transmit);
+	bt_mesh_relay_set(cfg.relay);
+	bt_mesh_relay_retransmit_set(cfg.relay_retransmit);
+	bt_mesh_beacon_set(cfg.beacon);
+	bt_mesh_gatt_proxy_set(cfg.gatt_proxy);
+	bt_mesh_friend_set(cfg.frnd);
+	bt_mesh_default_ttl_set(cfg.default_ttl);
+
 	BT_DBG("Restored configuration state");
 
 	return 0;
@@ -1124,7 +1116,6 @@ static void commit_mod(struct bt_mesh_model *mod, struct bt_mesh_elem *elem,
 
 static int mesh_commit(void)
 {
-	struct bt_mesh_cfg_srv *cfg;
 	int i;
 
 	BT_DBG("sub[0].net_idx 0x%03x", bt_mesh.sub[0].net_idx);
@@ -1157,17 +1148,6 @@ static int mesh_commit(void)
 	}
 
 	bt_mesh_model_foreach(commit_mod, NULL);
-
-	cfg = bt_mesh_cfg_get();
-	if (cfg && stored_cfg.valid) {
-		cfg->net_transmit = stored_cfg.cfg.net_transmit;
-		cfg->relay = stored_cfg.cfg.relay;
-		cfg->relay_retransmit = stored_cfg.cfg.relay_retransmit;
-		cfg->beacon = stored_cfg.cfg.beacon;
-		cfg->gatt_proxy = stored_cfg.cfg.gatt_proxy;
-		cfg->frnd = stored_cfg.cfg.frnd;
-		cfg->default_ttl = stored_cfg.cfg.default_ttl;
-	}
 
 	atomic_set_bit(bt_mesh.flags, BT_MESH_VALID);
 
@@ -1411,21 +1391,16 @@ static void store_pending_hb_pub(void)
 
 static void store_pending_cfg(void)
 {
-	struct bt_mesh_cfg_srv *cfg = bt_mesh_cfg_get();
 	struct cfg_val val;
 	int err;
 
-	if (!cfg) {
-		return;
-	}
-
-	val.net_transmit = cfg->net_transmit;
-	val.relay = cfg->relay;
-	val.relay_retransmit = cfg->relay_retransmit;
-	val.beacon = cfg->beacon;
-	val.gatt_proxy = cfg->gatt_proxy;
-	val.frnd = cfg->frnd;
-	val.default_ttl = cfg->default_ttl;
+	val.net_transmit = bt_mesh_net_transmit_get();
+	val.relay = bt_mesh_relay_get();
+	val.relay_retransmit = bt_mesh_relay_retransmit_get();
+	val.beacon = bt_mesh_beacon_get();
+	val.gatt_proxy = bt_mesh_gatt_proxy_get();
+	val.frnd = bt_mesh_friend_get();
+	val.default_ttl = bt_mesh_default_ttl_get();
 
 	err = settings_save_one("bt/mesh/Cfg", &val, sizeof(val));
 	if (err) {

@@ -10,6 +10,7 @@
 #ifndef ZEPHYR_INCLUDE_BLUETOOTH_MESH_CFG_SRV_H_
 #define ZEPHYR_INCLUDE_BLUETOOTH_MESH_CFG_SRV_H_
 
+#include <zephyr.h>
 /**
  * @brief Bluetooth Mesh
  * @defgroup bt_mesh_cfg_srv Bluetooth Mesh Configuration Server Model
@@ -21,7 +22,11 @@
 extern "C" {
 #endif
 
-/** Mesh Configuration Server Model Context */
+/** @brief Mesh Configuration Server Model Context
+ *
+ * @deprecated Configuration through the Config server structure is deprecated.
+ *             Instead, use the KConfig entries for each feature.
+ */
 struct bt_mesh_cfg_srv {
 	/** Composition data model entry pointer. */
 	struct bt_mesh_model *model;
@@ -58,7 +63,7 @@ struct bt_mesh_cfg_srv {
 		uint16_t feat;
 		/** Network index used for publishing. */
 		uint16_t net_idx;
-	} hb_pub __deprecated;
+	} hb_pub;
 
 	/** Heartbeat Subscription parameters.
 	 *
@@ -104,8 +109,8 @@ struct bt_mesh_cfg_srv {
 		 *             function.
 		 */
 		void (*func)(uint8_t hops, uint16_t feat);
-	} hb_sub __deprecated;
-};
+	} hb_sub;
+} __deprecated;
 
 /** @def BT_MESH_MODEL_CFG_SRV
  *
