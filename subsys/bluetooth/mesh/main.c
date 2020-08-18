@@ -175,9 +175,7 @@ void bt_mesh_reset(void)
 	k_delayed_work_cancel(&bt_mesh.ivu_timer);
 
 	bt_mesh_cfg_reset();
-
-	bt_mesh_rx_reset();
-	bt_mesh_tx_reset();
+	bt_mesh_trans_reset();
 
 	if (IS_ENABLED(CONFIG_BT_MESH_LOW_POWER)) {
 		if (IS_ENABLED(CONFIG_BT_MESH_LPN_SUB_ALL_NODES_ADDR)) {

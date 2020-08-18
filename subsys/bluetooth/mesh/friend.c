@@ -348,7 +348,7 @@ static int unseg_app_sdu_unpack(struct bt_mesh_friend *frnd,
 	}
 
 	if (BT_MESH_ADDR_IS_VIRTUAL(meta->net.ctx.recv_dst)) {
-		meta->ad = bt_mesh_label_uuid_get(meta->net.ctx.recv_dst);
+		meta->ad = bt_mesh_va_label_get(meta->net.ctx.recv_dst);
 		if (!meta->ad) {
 			return -ENOENT;
 		}

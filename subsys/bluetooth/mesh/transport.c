@@ -119,6 +119,8 @@ static struct seg_rx {
 
 K_MEM_SLAB_DEFINE(segs, BT_MESH_APP_SEG_SDU_MAX, CONFIG_BT_MESH_SEG_BUFS, 4);
 
+static struct bt_mesh_va virtual_addrs[CONFIG_BT_MESH_LABEL_COUNT];
+
 static int send_unseg(struct bt_mesh_net_tx *tx, struct net_buf_simple *sdu,
 		      const struct bt_mesh_send_cb *cb, void *cb_data,
 		      const uint8_t *ctl_op)
@@ -649,7 +651,7 @@ int bt_mesh_trans_send(struct bt_mesh_net_tx *tx, struct net_buf_simple *msg,
 	}
 
 	if (BT_MESH_ADDR_IS_VIRTUAL(tx->ctx->addr)) {
-		ad = bt_mesh_label_uuid_get(tx->ctx->addr);
+		ad = bt_mesh_va_label_get(tx->ctx->addr);
 	} else {
 		ad = NULL;
 	}
@@ -853,7 +855,7 @@ static int sdu_recv_unseg(struct bt_mesh_net_rx *rx, uint8_t hdr,
 	}
 
 	if (BT_MESH_ADDR_IS_VIRTUAL(rx->ctx.recv_dst)) {
-		ad = bt_mesh_label_uuid_get(rx->ctx.recv_dst);
+		ad = bt_mesh_va_label_get(rx->ctx.recv_dst);
 	} else {
 		ad = NULL;
 	}
@@ -936,7 +938,7 @@ static int sdu_recv_seg(struct seg_rx *seg, uint8_t hdr, uint8_t aszmic,
 	}
 
 	if (BT_MESH_ADDR_IS_VIRTUAL(rx->ctx.recv_dst)) {
-		ad = bt_mesh_label_uuid_get(rx->ctx.recv_dst);
+		ad = bt_mesh_va_label_get(rx->ctx.recv_dst);
 	} else {
 		ad = NULL;
 	}
@@ -1785,22 +1787,32 @@ void bt_mesh_rx_reset(void)
 	for (i = 0; i < ARRAY_SIZE(seg_rx); i++) {
 		seg_rx_reset(&seg_rx[i], true);
 	}
-
-	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
-		bt_mesh_clear_rpl();
-	} else {
-		(void)memset(bt_mesh.rpl, 0, sizeof(bt_mesh.rpl));
-	}
 }
 
-void bt_mesh_tx_reset(void)
+void bt_mesh_trans_reset(void)
 {
 	int i;
+
+	bt_mesh_rx_reset();
 
 	BT_DBG("");
 
 	for (i = 0; i < ARRAY_SIZE(seg_tx); i++) {
 		seg_tx_reset(&seg_tx[i]);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(virtual_addrs); i++) {
+		if (virtual_addrs[i].ref) {
+			virtual_addrs[i].ref = 0U;
+			virtual_addrs[i].changed = 1U;
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
+		bt_mesh_store_label();
+		bt_mesh_clear_rpl();
+	} else {
+		(void)memset(bt_mesh.rpl, 0, sizeof(bt_mesh.rpl));
 	}
 }
 
@@ -1867,4 +1879,119 @@ int bt_mesh_app_key_get(const struct bt_mesh_subnet *subnet, uint16_t app_idx,
 	}
 
 	return 0;
+}
+
+struct bt_mesh_va *bt_mesh_va_get(uint16_t index)
+{
+	if (index >= ARRAY_SIZE(virtual_addrs)) {
+		return NULL;
+	}
+
+	return &virtual_addrs[index];
+}
+
+static inline void va_store(struct bt_mesh_va *store)
+{
+	store->changed = 1U;
+	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
+		bt_mesh_store_label();
+	}
+}
+
+uint8_t bt_mesh_va_add(uint8_t uuid[16], uint16_t *addr)
+{
+	struct bt_mesh_va *va = NULL;
+	int err;
+
+	for (int i = 0; i < ARRAY_SIZE(virtual_addrs); i++) {
+		if (!virtual_addrs[i].ref) {
+			if (!va) {
+				va = &virtual_addrs[i];
+			}
+
+			continue;
+		}
+
+		if (!memcmp(uuid, virtual_addrs[i].uuid,
+			    ARRAY_SIZE(virtual_addrs[i].uuid))) {
+			*addr = virtual_addrs[i].addr;
+			virtual_addrs[i].ref++;
+			va_store(&virtual_addrs[i]);
+			return STATUS_SUCCESS;
+		}
+	}
+
+	if (!va) {
+		return STATUS_INSUFF_RESOURCES;
+	}
+
+	memcpy(va->uuid, uuid, ARRAY_SIZE(va->uuid));
+	err = bt_mesh_virtual_addr(uuid, &va->addr);
+	if (err) {
+		va->addr = BT_MESH_ADDR_UNASSIGNED;
+		return STATUS_UNSPECIFIED;
+	}
+
+	va->ref = 1;
+	va_store(va);
+
+	return STATUS_SUCCESS;
+}
+
+uint8_t bt_mesh_va_del(uint8_t uuid[16], uint16_t *addr)
+{
+	struct bt_mesh_va *va = NULL;
+
+	for (int i = 0; i < ARRAY_SIZE(virtual_addrs); i++) {
+		if (virtual_addrs[i].ref &&
+		    !memcmp(uuid, virtual_addrs[i].uuid,
+			    ARRAY_SIZE(virtual_addrs[i].uuid))) {
+			va = &virtual_addrs[i];
+			break;
+		}
+	}
+
+	if (!va) {
+		return STATUS_CANNOT_REMOVE;
+	}
+
+	va->ref--;
+	if (addr) {
+		*addr = va->addr;
+	}
+
+	va_store(va);
+	return STATUS_SUCCESS;
+}
+
+struct bt_mesh_va *bt_mesh_va_find(uint8_t uuid[16])
+{
+	for (int i = 0; i < ARRAY_SIZE(virtual_addrs); i++) {
+		if (virtual_addrs[i].ref &&
+		    !memcmp(uuid, virtual_addrs[i].uuid,
+			    ARRAY_SIZE(virtual_addrs[i].uuid))) {
+			return &virtual_addrs[i];
+		}
+	}
+
+	return NULL;
+}
+
+uint8_t *bt_mesh_va_label_get(uint16_t addr)
+{
+	int i;
+
+	BT_DBG("addr 0x%04x", addr);
+
+	for (i = 0; i < ARRAY_SIZE(virtual_addrs); i++) {
+		if (virtual_addrs[i].ref && virtual_addrs[i].addr == addr) {
+			BT_DBG("Found Label UUID for 0x%04x: %s", addr,
+			       bt_hex(virtual_addrs[i].uuid, 16));
+			return virtual_addrs[i].uuid;
+		}
+	}
+
+	BT_WARN("No matching Label UUID for 0x%04x", addr);
+
+	return NULL;
 }
