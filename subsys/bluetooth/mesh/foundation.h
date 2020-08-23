@@ -93,50 +93,9 @@
 #define OP_VND_MOD_APP_GET                 BT_MESH_MODEL_OP_2(0x80, 0x4d)
 #define OP_VND_MOD_APP_LIST                BT_MESH_MODEL_OP_2(0x80, 0x4e)
 
-#define STATUS_SUCCESS                     0x00
-#define STATUS_INVALID_ADDRESS             0x01
-#define STATUS_INVALID_MODEL               0x02
-#define STATUS_INVALID_APPKEY              0x03
-#define STATUS_INVALID_NETKEY              0x04
-#define STATUS_INSUFF_RESOURCES            0x05
-#define STATUS_IDX_ALREADY_STORED          0x06
-#define STATUS_NVAL_PUB_PARAM              0x07
-#define STATUS_NOT_SUB_MOD                 0x08
-#define STATUS_STORAGE_FAIL                0x09
-#define STATUS_FEAT_NOT_SUPP               0x0a
-#define STATUS_CANNOT_UPDATE               0x0b
-#define STATUS_CANNOT_REMOVE               0x0c
-#define STATUS_CANNOT_BIND                 0x0d
-#define STATUS_TEMP_STATE_CHG_FAIL         0x0e
-#define STATUS_CANNOT_SET                  0x0f
-#define STATUS_UNSPECIFIED                 0x10
-#define STATUS_INVALID_BINDING             0x11
-
-typedef uint8_t bt_mesh_status_t;
-
-enum {
-	BT_MESH_VA_CHANGED,	/* Label information changed */
-};
-
-struct label {
-	uint16_t ref;
-	uint16_t addr;
-	uint8_t  uuid[16];
-	atomic_t flags[1];
-};
-
 void bt_mesh_cfg_reset(void);
 
 void bt_mesh_attention(struct bt_mesh_model *model, uint8_t time);
-
-struct label *get_label(uint16_t index);
-
-uint8_t *bt_mesh_label_uuid_get(uint16_t addr);
-
-void bt_mesh_subnet_del(struct bt_mesh_subnet *sub, bool store);
-
-struct bt_mesh_app_key *bt_mesh_app_key_alloc(uint16_t app_idx);
-void bt_mesh_app_key_del(struct bt_mesh_app_key *key, bool store);
 
 #include <sys/byteorder.h>
 

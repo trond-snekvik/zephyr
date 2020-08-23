@@ -29,8 +29,9 @@ bool bt_mesh_friend_enqueue_tx(struct bt_mesh_net_tx *tx,
 			       const uint64_t *seq_auth, uint8_t seg_count,
 			       struct net_buf_simple *sbuf);
 
-void bt_mesh_friend_clear_incomplete(struct bt_mesh_subnet *sub, uint16_t src,
-				     uint16_t dst, uint64_t *seq_auth);
+void bt_mesh_friend_clear_incomplete(const struct bt_mesh_subnet *sub,
+				     uint16_t src, uint16_t dst,
+				     uint64_t *seq_auth);
 
 void bt_mesh_friend_sec_update(uint16_t net_idx);
 

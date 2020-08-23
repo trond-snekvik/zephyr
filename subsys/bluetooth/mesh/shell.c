@@ -681,8 +681,6 @@ static int cmd_net_send(const struct shell *shell, size_t argc, char *argv[])
 	struct bt_mesh_net_tx tx = {
 		.ctx = &ctx,
 		.src = net.local,
-		.xmit = bt_mesh_net_transmit_get(),
-		.sub = bt_mesh_subnet_get(net.net_idx),
 	};
 	size_t len;
 	int err;

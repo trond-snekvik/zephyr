@@ -321,7 +321,7 @@ static void proxy_cfg(struct bt_mesh_proxy_client *client)
 	}
 }
 
-static int beacon_send(struct bt_conn *conn, struct bt_mesh_subnet *sub)
+static int beacon_send(struct bt_conn *conn, const struct bt_mesh_subnet *sub)
 {
 	NET_BUF_SIMPLE_DEFINE(buf, 23);
 

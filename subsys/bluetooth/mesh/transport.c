@@ -28,6 +28,7 @@
 #include "adv.h"
 #include "mesh.h"
 #include "net.h"
+#include "keys.h"
 #include "lpn.h"
 #include "friend.h"
 #include "access.h"
@@ -74,7 +75,7 @@
 #define BUF_TIMEOUT                 K_NO_WAIT
 
 static struct seg_tx {
-	struct bt_mesh_subnet *sub;
+	const struct bt_mesh_subnet *sub;
 	void                  *seg[CONFIG_BT_MESH_TX_SEG_MAX];
 	uint64_t              seq_auth;
 	uint16_t              src;
@@ -100,7 +101,7 @@ static struct seg_tx {
 } seg_tx[CONFIG_BT_MESH_TX_SEG_MSG_COUNT];
 
 static struct seg_rx {
-	struct bt_mesh_subnet   *sub;
+	const struct bt_mesh_subnet   *sub;
 	void                    *seg[CONFIG_BT_MESH_RX_SEG_MAX];
 	uint64_t                    seq_auth;
 	uint16_t                    src;
@@ -589,22 +590,6 @@ static int send_seg(struct bt_mesh_net_tx *net_tx, struct net_buf_simple *sdu,
 	return 0;
 }
 
-struct bt_mesh_app_key *bt_mesh_app_key_find(uint16_t app_idx)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.app_keys); i++) {
-		struct bt_mesh_app_key *key = &bt_mesh.app_keys[i];
-
-		if (key->net_idx != BT_MESH_KEY_UNUSED &&
-		    key->app_idx == app_idx) {
-			return key;
-		}
-	}
-
-	return NULL;
-}
-
 int bt_mesh_trans_send(struct bt_mesh_net_tx *tx, struct net_buf_simple *msg,
 		       const struct bt_mesh_send_cb *cb, void *cb_data)
 {
@@ -636,12 +621,12 @@ int bt_mesh_trans_send(struct bt_mesh_net_tx *tx, struct net_buf_simple *msg,
 	       tx->ctx->app_idx, tx->ctx->addr);
 	BT_DBG("len %u: %s", msg->len, bt_hex(msg->data, msg->len));
 
-	err = bt_mesh_app_key_get(tx->sub, tx->ctx->app_idx,
-				  tx->ctx->addr, &key, &aid);
+	err = bt_mesh_keys_resolve(tx->ctx, &tx->sub, &key, &aid);
 	if (err) {
 		return err;
 	}
 
+	tx->xmit = bt_mesh_net_transmit_get();
 	tx->aid = aid;
 
 	if (!tx->ctx->send_rel || net_buf_simple_tailroom(msg) < 8) {
@@ -753,100 +738,18 @@ static void seg_rx_assemble(struct seg_rx *rx, struct net_buf_simple *buf,
 				       MIN(seg_len(rx->ctl),
 					   rx->len - (i * seg_len(rx->ctl))));
 	}
-
-	/* Adjust the length to not contain the MIC at the end */
-	if (!rx->ctl) {
-		buf->len -= APP_MIC_LEN(aszmic);
-	}
 }
 
-static int remote_devkey_decrypt(struct bt_mesh_net_rx *rx, uint32_t seq, uint8_t *ad,
-				 uint8_t aszmic, struct net_buf_simple *buf,
-				 struct net_buf_simple *sdu)
+static int sdu_recv(struct bt_mesh_net_rx *rx, uint8_t hdr, uint8_t aszmic,
+		    struct net_buf_simple *buf, struct net_buf_simple *sdu,
+		    struct seg_rx *seg)
 {
-	struct bt_mesh_cdb_node *node;
-	int err;
-
-	if (!IS_ENABLED(CONFIG_BT_MESH_PROVISIONER)) {
-		return -ENOENT;
-	}
-
-	/* We will try our local devkey separately. */
-	if (bt_mesh_elem_find(rx->ctx.addr)) {
-		return -ENOENT;
-	}
-
-	/*
-	 * There is no way of knowing if we should use our
-	 * local DevKey or the remote DevKey to decrypt the
-	 * message so we must try both.
-	 */
-	node = bt_mesh_cdb_node_get(rx->ctx.addr);
-	if (node == NULL) {
-		BT_ERR("No node found for addr 0x%04x", rx->ctx.addr);
-		return -EINVAL;
-	}
-
-	err = bt_mesh_app_decrypt(node->dev_key, true, aszmic, buf, sdu, ad,
-				  rx->ctx.addr, rx->ctx.recv_dst, seq,
-				  BT_MESH_NET_IVI_RX(rx));
-	if (err) {
-		BT_DBG("Unable to decrypt with node DevKey");
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int app_key_decrypt(struct bt_mesh_net_rx *rx,
-			   struct bt_mesh_app_key *key, uint32_t seq, uint8_t *ad,
-			   uint8_t hdr, uint8_t aszmic, struct net_buf_simple *buf,
-			   struct net_buf_simple *sdu)
-{
-	struct bt_mesh_app_keys *keys;
-	int err;
-
-	/* Check that this AppKey matches received net_idx */
-	if (key->net_idx != rx->sub->net_idx) {
-		return -EINVAL;
-	}
-
-	if (rx->new_key && key->updated) {
-		keys = &key->keys[1];
-	} else {
-		keys = &key->keys[0];
-	}
-
-	/* Check that the AppKey ID matches */
-	if (AID(&hdr) != keys->id) {
-		return -EINVAL;
-	}
-
-	err = bt_mesh_app_decrypt(keys->val, false, aszmic, buf, sdu, ad,
-				  rx->ctx.addr, rx->ctx.recv_dst, seq,
-				  BT_MESH_NET_IVI_RX(rx));
-	if (err) {
-		BT_WARN("Unable to decrypt with AppKey 0x%03x", key->app_idx);
-	}
-
-	return err;
-}
-
-static int sdu_recv_unseg(struct bt_mesh_net_rx *rx, uint8_t hdr,
-			  struct net_buf_simple *buf)
-{
-	NET_BUF_SIMPLE_DEFINE(sdu, BT_MESH_SDU_UNSEG_MAX);
+	uint8_t akf = AKF(&hdr);
+	uint8_t aid = AID(&hdr);
+	const uint8_t *key;
 	uint8_t *ad;
-	uint16_t i;
-	int err;
 
-	BT_DBG("AKF %u AID 0x%02x", AKF(&hdr), AID(&hdr));
-	BT_DBG("len %u: %s", buf->len, bt_hex(buf->data, buf->len));
-
-	if (buf->len < 1 + APP_MIC_LEN(0)) {
-		BT_ERR("Too short SDU + MIC");
-		return -EINVAL;
-	}
+	BT_DBG("AKF %u AID 0x%02x", akf, aid);
 
 	if (IS_ENABLED(CONFIG_BT_MESH_FRIEND) && !rx->local_match) {
 		BT_DBG("Ignoring PDU for LPN 0x%04x of this Friend",
@@ -860,151 +763,22 @@ static int sdu_recv_unseg(struct bt_mesh_net_rx *rx, uint8_t hdr,
 		ad = NULL;
 	}
 
-	/* Adjust the length to not contain the MIC at the end */
-	buf->len -= APP_MIC_LEN(0);
-
-	if (!AKF(&hdr)) {
-		/* Attempt remote dev key first, as that is only available for
-		 * provisioner devices, which normally don't interact with nodes
-		 * that know their local dev key.
-		 */
-		net_buf_simple_reset(&sdu);
-		err = remote_devkey_decrypt(rx, rx->seq, ad, 0, buf, &sdu);
-		if (!err) {
-			rx->ctx.app_idx = BT_MESH_KEY_DEV_REMOTE;
-			bt_mesh_model_recv(rx, &sdu);
-			return 0;
+	key = NULL;
+	while ((key = bt_mesh_app_key_next(rx, akf, aid, key))) {
+		if (seg) {
+			seg_rx_assemble(seg, buf, aszmic);
 		}
 
-		net_buf_simple_reset(&sdu);
-		err = bt_mesh_app_decrypt(bt_mesh.dev_key, true, 0, buf, &sdu,
-					  ad, rx->ctx.addr, rx->ctx.recv_dst,
-					  rx->seq, BT_MESH_NET_IVI_RX(rx));
-		if (err) {
-			BT_ERR("Unable to decrypt with local DevKey");
-			return err;
-		}
+		net_buf_simple_reset(sdu);
 
-		rx->ctx.app_idx = BT_MESH_KEY_DEV_LOCAL;
-		bt_mesh_model_recv(rx, &sdu);
-		return 0;
-	}
-
-	for (i = 0U; i < ARRAY_SIZE(bt_mesh.app_keys); i++) {
-		struct bt_mesh_app_key *key = &bt_mesh.app_keys[i];
-
-		net_buf_simple_reset(&sdu);
-		err = app_key_decrypt(rx, &bt_mesh.app_keys[i], rx->seq, ad,
-				      hdr, 0, buf, &sdu);
-
-		if (err) {
+		if (bt_mesh_app_decrypt(key, akf, aszmic, buf, sdu, ad,
+					rx->ctx.addr, rx->ctx.recv_dst, rx->seq,
+					BT_MESH_NET_IVI_RX(rx))) {
 			continue;
 		}
 
-		rx->ctx.app_idx = key->app_idx;
-
-		bt_mesh_model_recv(rx, &sdu);
+		bt_mesh_model_recv(rx, sdu);
 		return 0;
-	}
-
-	if (rx->local_match) {
-		BT_WARN("No matching AppKey");
-	}
-
-	return 0;
-}
-
-static int sdu_recv_seg(struct seg_rx *seg, uint8_t hdr, uint8_t aszmic,
-			struct bt_mesh_net_rx *rx)
-{
-	NET_BUF_SIMPLE_DEFINE(buf, BT_MESH_RX_SDU_MAX);
-	struct net_buf_simple sdu;
-	uint32_t seq = (seg->seq_auth & 0xffffff);
-	uint8_t *ad;
-	uint16_t i;
-	int err;
-
-	BT_DBG("ASZMIC %u AKF %u AID 0x%02x", aszmic, AKF(&hdr), AID(&hdr));
-
-	if (seg->len < 1 + APP_MIC_LEN(aszmic)) {
-		BT_ERR("Too short SDU + MIC");
-		return -EINVAL;
-	}
-
-	if (IS_ENABLED(CONFIG_BT_MESH_FRIEND) && !rx->local_match) {
-		BT_DBG("Ignoring PDU for LPN 0x%04x of this Friend",
-		       rx->ctx.recv_dst);
-		return 0;
-	}
-
-	if (BT_MESH_ADDR_IS_VIRTUAL(rx->ctx.recv_dst)) {
-		ad = bt_mesh_va_label_get(rx->ctx.recv_dst);
-	} else {
-		ad = NULL;
-	}
-
-	/* Decrypting in place to avoid creating two assembly buffers.
-	 * We'll reassemble the buffer from the segments before each decryption
-	 * attempt.
-	 */
-	if (!AKF(&hdr)) {
-		/* Attempt remote dev key first, as that is only available for
-		 * provisioner devices, which normally don't interact with nodes
-		 * that know their local dev key.
-		 */
-		seg_rx_assemble(seg, &buf, aszmic);
-		net_buf_simple_init_with_data(&sdu, buf.data,
-					      seg->len - APP_MIC_LEN(aszmic));
-		sdu.len = 0;
-
-		err = remote_devkey_decrypt(rx, seq, ad, aszmic, &buf, &sdu);
-		if (!err) {
-			rx->ctx.app_idx = BT_MESH_KEY_DEV_REMOTE;
-			bt_mesh_model_recv(rx, &sdu);
-			return 0;
-		}
-
-		seg_rx_assemble(seg, &buf, aszmic);
-		net_buf_simple_init_with_data(&sdu, buf.data,
-					      seg->len - APP_MIC_LEN(aszmic));
-		sdu.len = 0;
-
-		err = bt_mesh_app_decrypt(bt_mesh.dev_key, true, aszmic, &buf,
-					  &sdu, ad, rx->ctx.addr,
-					  rx->ctx.recv_dst, seq,
-					  BT_MESH_NET_IVI_RX(rx));
-		if (err) {
-			BT_ERR("Unable to decrypt with local DevKey");
-			return err;
-		}
-
-		rx->ctx.app_idx = BT_MESH_KEY_DEV_LOCAL;
-		bt_mesh_model_recv(rx, &sdu);
-		return 0;
-	}
-
-	for (i = 0U; i < ARRAY_SIZE(bt_mesh.app_keys); i++) {
-		struct bt_mesh_app_key *key = &bt_mesh.app_keys[i];
-
-		seg_rx_assemble(seg, &buf, aszmic);
-		net_buf_simple_init_with_data(&sdu, buf.data,
-					      seg->len - APP_MIC_LEN(aszmic));
-		sdu.len = 0;
-
-		err = app_key_decrypt(rx, &bt_mesh.app_keys[i], seq, ad, hdr,
-				      aszmic, &buf, &sdu);
-		if (err) {
-			continue;
-		}
-
-		rx->ctx.app_idx = key->app_idx;
-
-		bt_mesh_model_recv(rx, &sdu);
-		return 0;
-	}
-
-	if (rx->local_match) {
-		BT_WARN("No matching AppKey");
 	}
 
 	return 0;
@@ -1182,6 +956,7 @@ static int ctl_recv(struct bt_mesh_net_rx *rx, uint8_t hdr,
 static int trans_unseg(struct net_buf_simple *buf, struct bt_mesh_net_rx *rx,
 		       uint64_t *seq_auth)
 {
+	NET_BUF_SIMPLE_DEFINE_STATIC(sdu, BT_MESH_SDU_UNSEG_MAX);
 	uint8_t hdr;
 
 	BT_DBG("AFK %u AID 0x%02x", AKF(buf->data), AID(buf->data));
@@ -1201,14 +976,14 @@ static int trans_unseg(struct net_buf_simple *buf, struct bt_mesh_net_rx *rx,
 
 	if (rx->ctl) {
 		return ctl_recv(rx, hdr, buf, seq_auth);
-	} else {
-		/* SDUs must match a local element or an LPN of this Friend. */
-		if (!rx->local_match && !rx->friend_match) {
-			return 0;
-		}
-
-		return sdu_recv_unseg(rx, hdr, buf);
 	}
+
+	if (buf->len < 1 + APP_MIC_LEN(0)) {
+		BT_ERR("Too short SDU + MIC");
+		return -EINVAL;
+	}
+
+	return sdu_recv(rx, hdr, 0, buf, &sdu, NULL);
 }
 
 static inline int32_t ack_timeout(struct seg_rx *rx)
@@ -1261,8 +1036,9 @@ int bt_mesh_ctl_send(struct bt_mesh_net_tx *tx, uint8_t ctl_op, void *data,
 	}
 }
 
-static int send_ack(struct bt_mesh_subnet *sub, uint16_t src, uint16_t dst,
-		    uint8_t ttl, uint64_t *seq_auth, uint32_t block, uint8_t obo)
+static int send_ack(const struct bt_mesh_subnet *sub, uint16_t src,
+		    uint16_t dst, uint8_t ttl, uint64_t *seq_auth,
+		    uint32_t block, uint8_t obo)
 {
 	struct bt_mesh_msg_ctx ctx = {
 		.net_idx = sub->net_idx,
@@ -1675,12 +1451,29 @@ found_rx:
 	send_ack(net_rx->sub, net_rx->ctx.recv_dst, net_rx->ctx.addr,
 		 net_rx->ctx.send_ttl, seq_auth, rx->block, rx->obo);
 
+	/* Decrypt with seqAuth */
+	net_rx->seq = (rx->seq_auth & 0xffffff);
+
 	if (net_rx->ctl) {
 		NET_BUF_SIMPLE_DEFINE(sdu, BT_MESH_RX_CTL_MAX);
 		seg_rx_assemble(rx, &sdu, 0U);
 		err = ctl_recv(net_rx, *hdr, &sdu, seq_auth);
+	} else if (rx->len < 1 + APP_MIC_LEN(ASZMIC(hdr))) {
+		BT_ERR("Too short SDU + MIC");
+		err = -EINVAL;
 	} else {
-		err = sdu_recv_seg(rx, *hdr, ASZMIC(hdr), net_rx);
+		NET_BUF_SIMPLE_DEFINE_STATIC(seg_buf, BT_MESH_RX_SDU_MAX);
+		struct net_buf_simple sdu;
+
+		/* Decrypting in place to avoid creating two assembly buffers.
+		 * We'll reassemble the buffer from the segments before each
+		 * decryption attempt.
+		 */
+		net_buf_simple_init(&seg_buf, 0);
+		net_buf_simple_init_with_data(
+			&sdu, seg_buf.data, rx->len - APP_MIC_LEN(ASZMIC(hdr)));
+
+		err = sdu_recv(net_rx, *hdr, ASZMIC(hdr), &seg_buf, &sdu, rx);
 	}
 
 	seg_rx_reset(rx, false);
@@ -1833,52 +1626,6 @@ void bt_mesh_rpl_clear(void)
 {
 	BT_DBG("");
 	(void)memset(bt_mesh.rpl, 0, sizeof(bt_mesh.rpl));
-}
-
-int bt_mesh_app_key_get(const struct bt_mesh_subnet *subnet, uint16_t app_idx,
-			uint16_t addr, const uint8_t **key, uint8_t *aid)
-{
-	struct bt_mesh_app_key *app_key;
-
-	if (app_idx == BT_MESH_KEY_DEV_LOCAL ||
-	    (app_idx == BT_MESH_KEY_DEV_REMOTE &&
-	     bt_mesh_elem_find(addr) != NULL)) {
-		*aid = 0;
-		*key = bt_mesh.dev_key;
-		return 0;
-	} else if (app_idx == BT_MESH_KEY_DEV_REMOTE) {
-		if (!IS_ENABLED(CONFIG_BT_MESH_CDB)) {
-			return -EINVAL;
-		}
-
-		struct bt_mesh_cdb_node *node = bt_mesh_cdb_node_get(addr);
-		if (!node) {
-			return -EINVAL;
-		}
-
-		*key = node->dev_key;
-		*aid = 0;
-		return 0;
-	}
-
-	if (!subnet) {
-		return -EINVAL;
-	}
-
-	app_key = bt_mesh_app_key_find(app_idx);
-	if (!app_key) {
-		return -ENOENT;
-	}
-
-	if (subnet->kr_phase == BT_MESH_KR_PHASE_2 && app_key->updated) {
-		*key = app_key->keys[1].val;
-		*aid = app_key->keys[1].id;
-	} else {
-		*key = app_key->keys[0].val;
-		*aid = app_key->keys[0].id;
-	}
-
-	return 0;
 }
 
 struct bt_mesh_va *bt_mesh_va_get(uint16_t index)

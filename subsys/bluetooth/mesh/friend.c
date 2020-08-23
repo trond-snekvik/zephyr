@@ -22,6 +22,7 @@
 #include "adv.h"
 #include "mesh.h"
 #include "net.h"
+#include "keys.h"
 #include "transport.h"
 #include "access.h"
 #include "foundation.h"
@@ -325,8 +326,6 @@ static struct net_buf *create_friend_pdu(struct bt_mesh_friend *frnd,
 struct unseg_app_sdu_meta {
 	struct bt_mesh_net_rx net;
 	const uint8_t *key;
-	struct bt_mesh_subnet *subnet;
-	bool is_dev_key;
 	uint8_t aid;
 	uint8_t *ad;
 };
@@ -335,14 +334,12 @@ static int unseg_app_sdu_unpack(struct bt_mesh_friend *frnd,
 				struct net_buf *buf,
 				struct unseg_app_sdu_meta *meta)
 {
-	uint16_t app_idx = FRIEND_ADV(buf)->app_idx;
 	int err;
 
-	meta->subnet = bt_mesh_subnet_get(frnd->net_idx);
-	meta->is_dev_key = BT_MESH_IS_DEV_KEY(app_idx);
+	meta->net.ctx.app_idx = FRIEND_ADV(buf)->app_idx;
 	bt_mesh_net_header_parse(&buf->b, &meta->net);
-	err = bt_mesh_app_key_get(meta->subnet, app_idx, meta->net.ctx.recv_dst,
-				  &meta->key, &meta->aid);
+	err = bt_mesh_keys_resolve(&meta->net.ctx, &meta->net.sub, &meta->key,
+				   &meta->aid);
 	if (err) {
 		return err;
 	}
@@ -369,8 +366,9 @@ static int unseg_app_sdu_decrypt(struct bt_mesh_friend *frnd,
 	net_buf_simple_pull(&sdu, 10);
 	sdu.len -= 4;
 
-	return bt_mesh_app_decrypt(meta->key, meta->is_dev_key, 0, &sdu, &sdu,
-				   meta->ad, meta->net.ctx.addr,
+	return bt_mesh_app_decrypt(meta->key,
+				   BT_MESH_IS_DEV_KEY(meta->net.ctx.app_idx), 0,
+				   &sdu, &sdu, meta->ad, meta->net.ctx.addr,
 				   meta->net.ctx.recv_dst, meta->net.seq,
 				   BT_MESH_NET_IVI_TX);
 }
@@ -385,8 +383,9 @@ static int unseg_app_sdu_encrypt(struct bt_mesh_friend *frnd,
 	net_buf_simple_pull(&sdu, 10);
 	sdu.len -= 4;
 
-	return bt_mesh_app_encrypt(meta->key, meta->is_dev_key, 0, &sdu,
-				   meta->ad, meta->net.ctx.addr,
+	return bt_mesh_app_encrypt(meta->key,
+				   BT_MESH_IS_DEV_KEY(meta->net.ctx.app_idx), 0,
+				   &sdu, meta->ad, meta->net.ctx.addr,
 				   meta->net.ctx.recv_dst, bt_mesh.seq,
 				   BT_MESH_NET_IVI_TX);
 }
@@ -430,7 +429,7 @@ static int unseg_app_sdu_prepare(struct bt_mesh_friend *frnd,
 static int encrypt_friend_pdu(struct bt_mesh_friend *frnd, struct net_buf *buf,
 			      bool master_cred)
 {
-	struct bt_mesh_subnet *sub = bt_mesh_subnet_get(frnd->net_idx);
+	const struct bt_mesh_subnet *sub = bt_mesh_subnet_get(frnd->net_idx);
 	const uint8_t *enc, *priv;
 	uint32_t iv_index;
 	uint16_t src;
@@ -512,7 +511,7 @@ static struct net_buf *encode_update(struct bt_mesh_friend *frnd, uint8_t md)
 {
 	struct bt_mesh_ctl_friend_update *upd;
 	NET_BUF_SIMPLE_DEFINE(sdu, 1 + sizeof(*upd));
-	struct bt_mesh_subnet *sub = bt_mesh_subnet_get(frnd->net_idx);
+	const struct bt_mesh_subnet *sub = bt_mesh_subnet_get(frnd->net_idx);
 
 	__ASSERT_NO_MSG(sub != NULL);
 
@@ -1604,7 +1603,7 @@ bool bt_mesh_friend_enqueue_tx(struct bt_mesh_net_tx *tx,
 	return matched;
 }
 
-void bt_mesh_friend_clear_incomplete(struct bt_mesh_subnet *sub, uint16_t src,
+void bt_mesh_friend_clear_incomplete(const struct bt_mesh_subnet *sub, uint16_t src,
 				     uint16_t dst, uint64_t *seq_auth)
 {
 	int i;

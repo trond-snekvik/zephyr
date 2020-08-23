@@ -26,6 +26,7 @@
 
 #include "mesh.h"
 #include "net.h"
+#include "keys.h"
 #include "crypto.h"
 #include "transport.h"
 #include "heartbeat.h"
@@ -353,30 +354,20 @@ static int rpl_set(const char *name, size_t len_rd,
 static int net_key_set(const char *name, size_t len_rd,
 		       settings_read_cb read_cb, void *cb_arg)
 {
-	struct bt_mesh_subnet *sub;
 	struct net_key_val key;
-	int i, err;
 	uint16_t net_idx;
+	int err;
 
 	if (!name) {
 		BT_ERR("Insufficient number of arguments");
 		return -ENOENT;
 	}
 
-	net_idx = strtol(name, NULL, 16);
-	sub = bt_mesh_subnet_get(net_idx);
-
 	if (len_rd == 0) {
-		BT_DBG("val (null)");
-		if (!sub) {
-			BT_ERR("No subnet with NetKeyIndex 0x%03x", net_idx);
-			return -ENOENT;
-		}
-
-		BT_DBG("Deleting NetKeyIndex 0x%03x", net_idx);
-		bt_mesh_subnet_del(sub, false);
 		return 0;
 	}
+
+	net_idx = strtol(name, NULL, 16);
 
 	err = mesh_x_set(read_cb, cb_arg, &key, sizeof(key));
 	if (err) {
@@ -384,34 +375,13 @@ static int net_key_set(const char *name, size_t len_rd,
 		return err;
 	}
 
-	if (sub) {
-		BT_DBG("Updating existing NetKeyIndex 0x%03x", net_idx);
-
-		sub->kr_flag = key.kr_flag;
-		sub->kr_phase = key.kr_phase;
-		memcpy(sub->keys[0].net, &key.val[0], 16);
-		memcpy(sub->keys[1].net, &key.val[1], 16);
-
-		return 0;
-	}
-
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-		if (bt_mesh.sub[i].net_idx == BT_MESH_KEY_UNUSED) {
-			sub = &bt_mesh.sub[i];
-			break;
-		}
-	}
-
-	if (!sub) {
+	err = bt_mesh_subnet_set(
+		net_idx, key.kr_flag, key.kr_phase, key.val[0],
+		(key.kr_phase != BT_MESH_KR_NORMAL) ? key.val[1] : NULL);
+	if (err) {
 		BT_ERR("No space to allocate a new subnet");
-		return -ENOMEM;
+		return err;
 	}
-
-	sub->net_idx = net_idx;
-	sub->kr_flag = key.kr_flag;
-	sub->kr_phase = key.kr_phase;
-	memcpy(sub->keys[0].net, &key.val[0], 16);
-	memcpy(sub->keys[1].net, &key.val[1], 16);
 
 	BT_DBG("NetKeyIndex 0x%03x recovered from storage", net_idx);
 
@@ -421,7 +391,6 @@ static int net_key_set(const char *name, size_t len_rd,
 static int app_key_set(const char *name, size_t len_rd,
 		       settings_read_cb read_cb, void *cb_arg)
 {
-	struct bt_mesh_app_key *app;
 	struct app_key_val key;
 	uint16_t app_idx;
 	int err;
@@ -431,19 +400,11 @@ static int app_key_set(const char *name, size_t len_rd,
 		return -ENOENT;
 	}
 
-	app_idx = strtol(name, NULL, 16);
-
 	if (len_rd == 0) {
-		BT_DBG("val (null)");
-		BT_DBG("Deleting AppKeyIndex 0x%03x", app_idx);
-
-		app = bt_mesh_app_key_find(app_idx);
-		if (app) {
-			bt_mesh_app_key_del(app, false);
-		}
-
 		return 0;
 	}
+
+	app_idx = strtol(name, NULL, 16);
 
 	err = mesh_x_set(read_cb, cb_arg, &key, sizeof(key));
 	if (err) {
@@ -451,24 +412,12 @@ static int app_key_set(const char *name, size_t len_rd,
 		return err;
 	}
 
-	app = bt_mesh_app_key_find(app_idx);
-	if (!app) {
-		app = bt_mesh_app_key_alloc(app_idx);
-	}
-
-	if (!app) {
+	err = bt_mesh_app_key_set(app_idx, key.net_idx, key.val[0],
+				  key.updated ? key.val[1] : NULL);
+	if (err) {
 		BT_ERR("No space for a new app key");
 		return -ENOMEM;
 	}
-
-	app->net_idx = key.net_idx;
-	app->app_idx = app_idx;
-	app->updated = key.updated;
-	memcpy(app->keys[0].val, key.val[0], 16);
-	memcpy(app->keys[1].val, key.val[1], 16);
-
-	bt_mesh_app_id(app->keys[0].val, &app->keys[0].id);
-	bt_mesh_app_id(app->keys[1].val, &app->keys[1].id);
 
 	BT_DBG("AppKeyIndex 0x%03x recovered from storage", app_idx);
 
@@ -1059,37 +1008,6 @@ static int mesh_set(const char *name, size_t len_rd,
 	return -ENOENT;
 }
 
-static int subnet_init(struct bt_mesh_subnet *sub)
-{
-	int err;
-
-	err = bt_mesh_net_keys_create(&sub->keys[0], sub->keys[0].net);
-	if (err) {
-		BT_ERR("Unable to generate keys for subnet");
-		return -EIO;
-	}
-
-	if (sub->kr_phase != BT_MESH_KR_NORMAL) {
-		err = bt_mesh_net_keys_create(&sub->keys[1], sub->keys[1].net);
-		if (err) {
-			BT_ERR("Unable to generate keys for subnet");
-			(void)memset(&sub->keys[0], 0, sizeof(sub->keys[0]));
-			return -EIO;
-		}
-	}
-
-	if (IS_ENABLED(CONFIG_BT_MESH_GATT_PROXY)) {
-		sub->node_id = BT_MESH_NODE_IDENTITY_STOPPED;
-	} else {
-		sub->node_id = BT_MESH_NODE_IDENTITY_NOT_SUPPORTED;
-	}
-
-	/* Make sure we have valid beacon data to be sent */
-	bt_mesh_net_beacon_update(sub);
-
-	return 0;
-}
-
 static void commit_mod(struct bt_mesh_model *mod, struct bt_mesh_elem *elem,
 		       bool vnd, bool primary, void *user_data)
 {
@@ -1116,8 +1034,6 @@ static void commit_mod(struct bt_mesh_model *mod, struct bt_mesh_elem *elem,
 
 static int mesh_commit(void)
 {
-	int i;
-
 	BT_DBG("sub[0].net_idx 0x%03x", bt_mesh.sub[0].net_idx);
 
 	if (bt_mesh.sub[0].net_idx == BT_MESH_KEY_UNUSED) {
@@ -1127,20 +1043,6 @@ static int mesh_commit(void)
 
 	if (IS_ENABLED(CONFIG_BT_MESH_PB_GATT)) {
 		bt_mesh_proxy_prov_disable(true);
-	}
-
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-		struct bt_mesh_subnet *sub = &bt_mesh.sub[i];
-		int err;
-
-		if (sub->net_idx == BT_MESH_KEY_UNUSED) {
-			continue;
-		}
-
-		err = subnet_init(sub);
-		if (err) {
-			BT_ERR("Failed to init subnet 0x%03x", sub->net_idx);
-		}
 	}
 
 	if (bt_mesh.ivu_duration < BT_MESH_IVU_MIN_HOURS) {
@@ -1453,7 +1355,7 @@ static void clear_net_key(uint16_t net_idx)
 	}
 }
 
-static void store_net_key(struct bt_mesh_subnet *sub)
+static void store_net_key(const struct bt_mesh_subnet *sub)
 {
 	struct net_key_val key;
 	char path[20];
@@ -1477,7 +1379,7 @@ static void store_net_key(struct bt_mesh_subnet *sub)
 	}
 }
 
-static void store_app_key(struct bt_mesh_app_key *app)
+static void store_app_key(const struct bt_mesh_app_key *app)
 {
 	struct app_key_val key;
 	char path[20];
@@ -1517,9 +1419,9 @@ static void store_pending_keys(void)
 			}
 		} else {
 			if (update->app_key) {
-				struct bt_mesh_app_key *key;
+				const struct bt_mesh_app_key *key;
 
-				key = bt_mesh_app_key_find(update->key_idx);
+				key = bt_mesh_app_key_get(update->key_idx);
 				if (key) {
 					store_app_key(key);
 				} else {
@@ -1528,7 +1430,7 @@ static void store_pending_keys(void)
 				}
 
 			} else {
-				struct bt_mesh_subnet *sub;
+				const struct bt_mesh_subnet *sub;
 
 				sub = bt_mesh_subnet_get(update->key_idx);
 				if (sub) {

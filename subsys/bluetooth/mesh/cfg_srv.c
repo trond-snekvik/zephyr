@@ -30,6 +30,7 @@
 #include "lpn.h"
 #include "transport.h"
 #include "heartbeat.h"
+#include "keys.h"
 #include "crypto.h"
 #include "access.h"
 #include "beacon.h"
@@ -169,22 +170,6 @@ static struct bt_mesh_model *get_model(struct bt_mesh_elem *elem,
 	}
 }
 
-static bool app_key_is_valid(uint16_t app_idx)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.app_keys); i++) {
-		struct bt_mesh_app_key *key = &bt_mesh.app_keys[i];
-
-		if (key->net_idx != BT_MESH_KEY_UNUSED &&
-		    key->app_idx == app_idx) {
-			return true;
-		}
-	}
-
-	return false;
-}
-
 static uint8_t _mod_pub_set(struct bt_mesh_model *model, uint16_t pub_addr,
 			 uint16_t app_idx, uint8_t cred_flag, uint8_t ttl, uint8_t period,
 			 uint8_t retransmit, bool store)
@@ -225,7 +210,7 @@ static uint8_t _mod_pub_set(struct bt_mesh_model *model, uint16_t pub_addr,
 		return STATUS_SUCCESS;
 	}
 
-	if (!bt_mesh_app_key_find(app_idx)) {
+	if (!bt_mesh_app_key_get(app_idx)) {
 		return STATUS_INVALID_APPKEY;
 	}
 
@@ -263,7 +248,7 @@ static uint8_t mod_bind(struct bt_mesh_model *model, uint16_t key_idx)
 
 	BT_DBG("model %p key_idx 0x%03x", model, key_idx);
 
-	if (!app_key_is_valid(key_idx)) {
+	if (!bt_mesh_app_key_get(key_idx)) {
 		return STATUS_INVALID_APPKEY;
 	}
 
@@ -295,7 +280,7 @@ static uint8_t mod_unbind(struct bt_mesh_model *model, uint16_t key_idx, bool st
 
 	BT_DBG("model %p key_idx 0x%03x store %u", model, key_idx, store);
 
-	if (!app_key_is_valid(key_idx)) {
+	if (!bt_mesh_app_key_get(key_idx)) {
 		return STATUS_INVALID_APPKEY;
 	}
 
@@ -319,115 +304,45 @@ static uint8_t mod_unbind(struct bt_mesh_model *model, uint16_t key_idx, bool st
 	return STATUS_SUCCESS;
 }
 
-struct bt_mesh_app_key *bt_mesh_app_key_alloc(uint16_t app_idx)
+static void mod_app_key_del(struct bt_mesh_model *mod,
+			    struct bt_mesh_elem *elem, bool vnd, bool primary,
+			    void *user_data)
 {
-	int i;
+	uint16_t *app_idx = user_data;
 
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.app_keys); i++) {
-		struct bt_mesh_app_key *key = &bt_mesh.app_keys[i];
-
-		if (key->net_idx == BT_MESH_KEY_UNUSED) {
-			return key;
-		}
-	}
-
-	return NULL;
+	mod_unbind(mod, *app_idx, true);
 }
 
-static uint8_t app_key_set(uint16_t net_idx, uint16_t app_idx, const uint8_t val[16],
-			bool update)
+static void app_key_evt(uint16_t app_idx,
+			const struct bt_mesh_app_key_state *state,
+			enum bt_mesh_key_evt evt)
 {
-	struct bt_mesh_app_keys *keys;
-	struct bt_mesh_app_key *key;
-	struct bt_mesh_subnet *sub;
-
-	BT_DBG("net_idx 0x%04x app_idx %04x update %u val %s",
-	       net_idx, app_idx, update, bt_hex(val, 16));
-
-	sub = bt_mesh_subnet_get(net_idx);
-	if (!sub) {
-		return STATUS_INVALID_NETKEY;
+	if (evt == BT_MESH_KEY_DELETED) {
+		bt_mesh_model_foreach(&mod_app_key_del, &app_idx);
 	}
+}
 
-	key = bt_mesh_app_key_find(app_idx);
-	if (update) {
-		if (!key) {
-			return STATUS_INVALID_APPKEY;
-		}
+static struct bt_mesh_app_key_cb app_key_cb = { app_key_evt };
 
-		if (key->net_idx != net_idx) {
-			return STATUS_INVALID_BINDING;
-		}
+static void send_app_key_status(struct bt_mesh_model *model,
+				struct bt_mesh_msg_ctx *ctx, uint8_t status,
+				uint16_t app_idx, uint16_t net_idx)
+{
+	BT_MESH_MODEL_BUF_DEFINE(msg, OP_APP_KEY_STATUS, 4);
 
-		keys = &key->keys[1];
+	bt_mesh_model_msg_init(&msg, OP_APP_KEY_STATUS);
+	net_buf_simple_add_u8(&msg, status);
+	key_idx_pack(&msg, net_idx, app_idx);
 
-		/* The AppKey Update message shall generate an error when node
-		 * is in normal operation, Phase 2, or Phase 3 or in Phase 1
-		 * when the AppKey Update message on a valid AppKeyIndex when
-		 * the AppKey value is different.
-		 */
-		if (sub->kr_phase != BT_MESH_KR_PHASE_1) {
-			return STATUS_CANNOT_UPDATE;
-		}
-
-		if (key->updated) {
-			if (memcmp(keys->val, val, 16)) {
-				return STATUS_CANNOT_UPDATE;
-			} else {
-				return STATUS_SUCCESS;
-			}
-		}
-
-		key->updated = true;
-	} else {
-		if (key) {
-			if (key->net_idx == net_idx &&
-			    !memcmp(key->keys[0].val, val, 16)) {
-				return STATUS_SUCCESS;
-			}
-
-			if (key->net_idx == net_idx) {
-				return STATUS_IDX_ALREADY_STORED;
-			} else {
-				return STATUS_INVALID_NETKEY;
-			}
-		}
-
-		key = bt_mesh_app_key_alloc(app_idx);
-		if (!key) {
-			return STATUS_INSUFF_RESOURCES;
-		}
-
-		keys = &key->keys[0];
+	if (bt_mesh_model_send(model, ctx, &msg, NULL, NULL)) {
+		BT_ERR("Unable to send App Key Status response");
 	}
-
-	if (bt_mesh_app_id(val, &keys->id)) {
-		if (update) {
-			key->updated = false;
-		}
-
-		return STATUS_STORAGE_FAIL;
-	}
-
-	BT_DBG("app_idx 0x%04x AID 0x%02x", app_idx, keys->id);
-
-	key->net_idx = net_idx;
-	key->app_idx = app_idx;
-	memcpy(keys->val, val, 16);
-
-	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
-		BT_DBG("Storing AppKey persistently");
-		bt_mesh_store_app_key(key);
-	}
-
-	return STATUS_SUCCESS;
 }
 
 static void app_key_add(struct bt_mesh_model *model,
 			struct bt_mesh_msg_ctx *ctx,
 			struct net_buf_simple *buf)
 {
-	BT_MESH_MODEL_BUF_DEFINE(msg, OP_APP_KEY_STATUS, 4);
 	uint16_t key_net_idx, key_app_idx;
 	uint8_t status;
 
@@ -435,17 +350,9 @@ static void app_key_add(struct bt_mesh_model *model,
 
 	BT_DBG("AppIdx 0x%04x NetIdx 0x%04x", key_app_idx, key_net_idx);
 
-	bt_mesh_model_msg_init(&msg, OP_APP_KEY_STATUS);
+	status = bt_mesh_app_key_add(key_app_idx, key_net_idx, buf->data);
 
-	status = app_key_set(key_net_idx, key_app_idx, buf->data, false);
-	BT_DBG("status 0x%02x", status);
-	net_buf_simple_add_u8(&msg, status);
-
-	key_idx_pack(&msg, key_net_idx, key_app_idx);
-
-	if (bt_mesh_model_send(model, ctx, &msg, NULL, NULL)) {
-		BT_ERR("Unable to send App Key Status response");
-	}
+	send_app_key_status(model, ctx, status, key_app_idx, key_net_idx);
 }
 
 static void app_key_update(struct bt_mesh_model *model,
@@ -462,7 +369,7 @@ static void app_key_update(struct bt_mesh_model *model,
 
 	bt_mesh_model_msg_init(&msg, OP_APP_KEY_STATUS);
 
-	status = app_key_set(key_net_idx, key_app_idx, buf->data, true);
+	status = bt_mesh_app_key_update(key_app_idx, key_net_idx, buf->data);
 	BT_DBG("status 0x%02x", status);
 	net_buf_simple_add_u8(&msg, status);
 
@@ -473,80 +380,20 @@ static void app_key_update(struct bt_mesh_model *model,
 	}
 }
 
-struct unbind_data {
-	uint16_t app_idx;
-	bool store;
-};
-
-static void _mod_unbind(struct bt_mesh_model *mod, struct bt_mesh_elem *elem,
-			bool vnd, bool primary, void *user_data)
-{
-	struct unbind_data *data = user_data;
-
-	mod_unbind(mod, data->app_idx, data->store);
-}
-
-void bt_mesh_app_key_del(struct bt_mesh_app_key *key, bool store)
-{
-	struct unbind_data data = { .app_idx = key->app_idx, .store = store };
-
-	BT_DBG("AppIdx 0x%03x store %u", key->app_idx, store);
-
-	bt_mesh_model_foreach(_mod_unbind, &data);
-
-	if (IS_ENABLED(CONFIG_BT_SETTINGS) && store) {
-		bt_mesh_clear_app_key(key);
-	}
-
-	key->net_idx = BT_MESH_KEY_UNUSED;
-	(void)memset(key->keys, 0, sizeof(key->keys));
-}
-
 static void app_key_del(struct bt_mesh_model *model,
 			struct bt_mesh_msg_ctx *ctx,
 			struct net_buf_simple *buf)
 {
-	BT_MESH_MODEL_BUF_DEFINE(msg, OP_APP_KEY_STATUS, 4);
 	uint16_t key_net_idx, key_app_idx;
-	struct bt_mesh_app_key *key;
 	uint8_t status;
 
 	key_idx_unpack(buf, &key_net_idx, &key_app_idx);
 
 	BT_DBG("AppIdx 0x%04x NetIdx 0x%04x", key_app_idx, key_net_idx);
 
-	if (!bt_mesh_subnet_get(key_net_idx)) {
-		status = STATUS_INVALID_NETKEY;
-		goto send_status;
-	}
+	status = bt_mesh_app_key_del(key_net_idx, key_net_idx);
 
-	key = bt_mesh_app_key_find(key_app_idx);
-	if (!key) {
-		/* Treat as success since the client might have missed a
-		 * previous response and is resending the request.
-		 */
-		status = STATUS_SUCCESS;
-		goto send_status;
-	}
-
-	if (key->net_idx != key_net_idx) {
-		status = STATUS_INVALID_BINDING;
-		goto send_status;
-	}
-
-	bt_mesh_app_key_del(key, true);
-	status = STATUS_SUCCESS;
-
-send_status:
-	bt_mesh_model_msg_init(&msg, OP_APP_KEY_STATUS);
-
-	net_buf_simple_add_u8(&msg, status);
-
-	key_idx_pack(&msg, key_net_idx, key_app_idx);
-
-	if (bt_mesh_model_send(model, ctx, &msg, NULL, NULL)) {
-		BT_ERR("Unable to send App Key Status response");
-	}
+	send_app_key_status(model, ctx, status, key_app_idx, key_net_idx);
 }
 
 /* Index list length: 3 bytes for every pair and 2 bytes for an odd idx */
@@ -558,7 +405,8 @@ static void app_key_get(struct bt_mesh_model *model,
 {
 	BT_MESH_MODEL_BUF_DEFINE(msg, OP_APP_KEY_LIST,
 				 3 + IDX_LEN(CONFIG_BT_MESH_APP_KEY_COUNT));
-	uint16_t get_idx, i, prev;
+	const uint16_t *app_idx;
+	uint16_t get_idx, prev;
 	uint8_t status;
 
 	get_idx = net_buf_simple_pull_le16(buf);
@@ -585,19 +433,15 @@ static void app_key_get(struct bt_mesh_model *model,
 	}
 
 	prev = BT_MESH_KEY_UNUSED;
-	for (i = 0U; i < ARRAY_SIZE(bt_mesh.app_keys); i++) {
-		struct bt_mesh_app_key *key = &bt_mesh.app_keys[i];
 
-		if (key->net_idx != get_idx) {
-			continue;
-		}
-
+	app_idx = NULL;
+	while ((app_idx = bt_mesh_app_idx_next(get_idx, app_idx))) {
 		if (prev == BT_MESH_KEY_UNUSED) {
-			prev = key->app_idx;
+			prev = *app_idx;
 			continue;
 		}
 
-		key_idx_pack(&msg, prev, key->app_idx);
+		key_idx_pack(&msg, prev, *app_idx);
 		prev = BT_MESH_KEY_UNUSED;
 	}
 
@@ -1744,9 +1588,8 @@ static void net_key_add(struct bt_mesh_model *model,
 			struct bt_mesh_msg_ctx *ctx,
 			struct net_buf_simple *buf)
 {
-	struct bt_mesh_subnet *sub;
+	uint8_t status;
 	uint16_t idx;
-	int err;
 
 	idx = net_buf_simple_pull_le16(buf);
 	if (idx > 0xfff) {
@@ -1756,72 +1599,17 @@ static void net_key_add(struct bt_mesh_model *model,
 
 	BT_DBG("idx 0x%04x", idx);
 
-	sub = bt_mesh_subnet_get(idx);
-	if (!sub) {
-		int i;
+	status = bt_mesh_subnet_add(idx, buf->data);
 
-		for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-			if (bt_mesh.sub[i].net_idx == BT_MESH_KEY_UNUSED) {
-				sub = &bt_mesh.sub[i];
-				break;
-			}
-		}
-
-		if (!sub) {
-			send_net_key_status(model, ctx, idx,
-					    STATUS_INSUFF_RESOURCES);
-			return;
-		}
-	}
-
-	/* Check for already existing subnet */
-	if (sub->net_idx == idx) {
-		uint8_t status;
-
-		if (memcmp(buf->data, sub->keys[0].net, 16)) {
-			status = STATUS_IDX_ALREADY_STORED;
-		} else {
-			status = STATUS_SUCCESS;
-		}
-
-		send_net_key_status(model, ctx, idx, status);
-		return;
-	}
-
-	err = bt_mesh_net_keys_create(&sub->keys[0], buf->data);
-	if (err) {
-		send_net_key_status(model, ctx, idx, STATUS_UNSPECIFIED);
-		return;
-	}
-
-	sub->net_idx = idx;
-
-	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
-		BT_DBG("Storing NetKey persistently");
-		bt_mesh_store_subnet(sub);
-	}
-
-	/* Make sure we have valid beacon data to be sent */
-	bt_mesh_net_beacon_update(sub);
-
-	if (IS_ENABLED(CONFIG_BT_MESH_GATT_PROXY)) {
-		sub->node_id = BT_MESH_NODE_IDENTITY_STOPPED;
-		bt_mesh_proxy_beacon_send(sub);
-		bt_mesh_adv_update();
-	} else {
-		sub->node_id = BT_MESH_NODE_IDENTITY_NOT_SUPPORTED;
-	}
-
-	send_net_key_status(model, ctx, idx, STATUS_SUCCESS);
+	send_net_key_status(model, ctx, idx, status);
 }
 
 static void net_key_update(struct bt_mesh_model *model,
 			   struct bt_mesh_msg_ctx *ctx,
 			   struct net_buf_simple *buf)
 {
-	struct bt_mesh_subnet *sub;
+	uint8_t status;
 	uint16_t idx;
-	int err;
 
 	idx = net_buf_simple_pull_le16(buf);
 	if (idx > 0xfff) {
@@ -1829,68 +1617,16 @@ static void net_key_update(struct bt_mesh_model *model,
 		return;
 	}
 
-	BT_DBG("idx 0x%04x", idx);
+	status = bt_mesh_subnet_update(idx, buf->data);
 
-	sub = bt_mesh_subnet_get(idx);
-	if (!sub) {
-		send_net_key_status(model, ctx, idx, STATUS_INVALID_NETKEY);
-		return;
-	}
-
-	/* The node shall successfully process a NetKey Update message on a
-	 * valid NetKeyIndex when the NetKey value is different and the Key
-	 * Refresh procedure has not been started, or when the NetKey value is
-	 * the same in Phase 1. The NetKey Update message shall generate an
-	 * error when the node is in Phase 2, or Phase 3.
-	 */
-	switch (sub->kr_phase) {
-	case BT_MESH_KR_NORMAL:
-		if (!memcmp(buf->data, sub->keys[0].net, 16)) {
-			return;
-		}
-		break;
-	case BT_MESH_KR_PHASE_1:
-		if (!memcmp(buf->data, sub->keys[1].net, 16)) {
-			send_net_key_status(model, ctx, idx, STATUS_SUCCESS);
-			return;
-		}
-		/* fall through */
-	case BT_MESH_KR_PHASE_2:
-	case BT_MESH_KR_PHASE_3:
-		send_net_key_status(model, ctx, idx, STATUS_CANNOT_UPDATE);
-		return;
-	}
-
-	err = bt_mesh_net_keys_create(&sub->keys[1], buf->data);
-	if (!err && (IS_ENABLED(CONFIG_BT_MESH_LOW_POWER) ||
-		     IS_ENABLED(CONFIG_BT_MESH_FRIEND))) {
-		err = friend_cred_update(sub);
-	}
-
-	if (err) {
-		send_net_key_status(model, ctx, idx, STATUS_UNSPECIFIED);
-		return;
-	}
-
-	sub->kr_phase = BT_MESH_KR_PHASE_1;
-
-	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
-		BT_DBG("Storing NetKey persistently");
-		bt_mesh_store_subnet(sub);
-	}
-
-	bt_mesh_net_beacon_update(sub);
-
-	send_net_key_status(model, ctx, idx, STATUS_SUCCESS);
+	send_net_key_status(model, ctx, idx, status);
 }
 
 static void net_key_del(struct bt_mesh_model *model,
 			struct bt_mesh_msg_ctx *ctx,
 			struct net_buf_simple *buf)
 {
-	struct bt_mesh_subnet *sub;
 	uint16_t del_idx;
-	uint8_t status;
 
 	del_idx = net_buf_simple_pull_le16(buf);
 	if (del_idx > 0xfff) {
@@ -1900,28 +1636,17 @@ static void net_key_del(struct bt_mesh_model *model,
 
 	BT_DBG("idx 0x%04x", del_idx);
 
-	sub = bt_mesh_subnet_get(del_idx);
-	if (!sub) {
-		/* This could be a retry of a previous attempt that had its
-		 * response lost, so pretend that it was a success.
-		 */
-		status = STATUS_SUCCESS;
-		goto send_status;
-	}
-
 	/* The key that the message was encrypted with cannot be removed.
 	 * The NetKey List must contain a minimum of one NetKey.
 	 */
 	if (ctx->net_idx == del_idx) {
-		status = STATUS_CANNOT_REMOVE;
-		goto send_status;
+		send_net_key_status(model, ctx, del_idx, STATUS_CANNOT_REMOVE);
+		return;
 	}
 
-	bt_mesh_subnet_del(sub, true);
-	status = STATUS_SUCCESS;
+	bt_mesh_subnet_del(del_idx);
 
-send_status:
-	send_net_key_status(model, ctx, del_idx, status);
+	send_net_key_status(model, ctx, del_idx, STATUS_SUCCESS);
 }
 
 static void net_key_get(struct bt_mesh_model *model,
@@ -1930,24 +1655,21 @@ static void net_key_get(struct bt_mesh_model *model,
 {
 	BT_MESH_MODEL_BUF_DEFINE(msg, OP_NET_KEY_LIST,
 				 IDX_LEN(CONFIG_BT_MESH_SUBNET_COUNT));
-	uint16_t prev, i;
+	const uint16_t *net_idx;
+	uint16_t prev;
 
 	bt_mesh_model_msg_init(&msg, OP_NET_KEY_LIST);
 
+	net_idx = NULL;
 	prev = BT_MESH_KEY_UNUSED;
-	for (i = 0U; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-		struct bt_mesh_subnet *sub = &bt_mesh.sub[i];
-
-		if (sub->net_idx == BT_MESH_KEY_UNUSED) {
-			continue;
-		}
-
+	while ((net_idx = bt_mesh_net_idx_next(net_idx)) &&
+	       net_buf_simple_tailroom(&msg) >= 2) {
 		if (prev == BT_MESH_KEY_UNUSED) {
-			prev = sub->net_idx;
+			prev = *net_idx;
 			continue;
 		}
 
-		key_idx_pack(&msg, prev, sub->net_idx);
+		key_idx_pack(&msg, prev, *net_idx);
 		prev = BT_MESH_KEY_UNUSED;
 	}
 
@@ -1960,14 +1682,30 @@ static void net_key_get(struct bt_mesh_model *model,
 	}
 }
 
+static void send_node_id_status(struct bt_mesh_model *model,
+				struct bt_mesh_msg_ctx *ctx, uint8_t status,
+				uint16_t net_idx, uint8_t node_id)
+{
+	BT_MESH_MODEL_BUF_DEFINE(msg, OP_NODE_IDENTITY_STATUS, 4);
+
+	bt_mesh_model_msg_init(&msg, OP_NODE_IDENTITY_STATUS);
+	net_buf_simple_add_u8(&msg, status);
+	net_buf_simple_add_le16(&msg, net_idx);
+	net_buf_simple_add_u8(&msg, node_id);
+
+	if (bt_mesh_model_send(model, ctx, &msg, NULL, NULL)) {
+		BT_ERR("Unable to send Node Identity Status");
+	}
+}
+
 static void node_identity_get(struct bt_mesh_model *model,
 			      struct bt_mesh_msg_ctx *ctx,
 			      struct net_buf_simple *buf)
 {
-	BT_MESH_MODEL_BUF_DEFINE(msg, OP_NODE_IDENTITY_STATUS, 4);
-	struct bt_mesh_subnet *sub;
-	uint8_t node_id;
+	struct bt_mesh_subnet_flags flags = {};
+	uint8_t status;
 	uint16_t idx;
+	int err;
 
 	BT_DBG("net_idx 0x%04x app_idx 0x%04x src 0x%04x len %u: %s",
 	       ctx->net_idx, ctx->app_idx, ctx->addr, buf->len,
@@ -1979,32 +1717,22 @@ static void node_identity_get(struct bt_mesh_model *model,
 		return;
 	}
 
-	bt_mesh_model_msg_init(&msg, OP_NODE_IDENTITY_STATUS);
-
-	sub = bt_mesh_subnet_get(idx);
-	if (!sub) {
-		net_buf_simple_add_u8(&msg, STATUS_INVALID_NETKEY);
-		node_id = 0x00;
+	err = bt_mesh_subnet_flags_get(idx, &flags);
+	if (err) {
+		status = STATUS_INVALID_NETKEY;
+		flags.node_id = 0x00;
 	} else {
-		net_buf_simple_add_u8(&msg, STATUS_SUCCESS);
-		node_id = sub->node_id;
+		status = STATUS_SUCCESS;
 	}
 
-	net_buf_simple_add_le16(&msg, idx);
-	net_buf_simple_add_u8(&msg, node_id);
-
-	if (bt_mesh_model_send(model, ctx, &msg, NULL, NULL)) {
-		BT_ERR("Unable to send Node Identity Status");
-	}
+	send_node_id_status(model, ctx, status, idx, flags.node_id);
 }
 
 static void node_identity_set(struct bt_mesh_model *model,
 			      struct bt_mesh_msg_ctx *ctx,
 			      struct net_buf_simple *buf)
 {
-	BT_MESH_MODEL_BUF_DEFINE(msg, OP_NODE_IDENTITY_STATUS, 4);
-	struct bt_mesh_subnet *sub;
-	uint8_t node_id;
+	uint8_t node_id, status;
 	uint16_t idx;
 
 	BT_DBG("net_idx 0x%04x app_idx 0x%04x src 0x%04x len %u: %s",
@@ -2023,32 +1751,21 @@ static void node_identity_set(struct bt_mesh_model *model,
 		return;
 	}
 
-	bt_mesh_model_msg_init(&msg, OP_NODE_IDENTITY_STATUS);
-
-	sub = bt_mesh_subnet_get(idx);
-	if (!sub) {
-		net_buf_simple_add_u8(&msg, STATUS_INVALID_NETKEY);
-		net_buf_simple_add_le16(&msg, idx);
-		net_buf_simple_add_u8(&msg, node_id);
-	} else  {
-		net_buf_simple_add_u8(&msg, STATUS_SUCCESS);
-		net_buf_simple_add_le16(&msg, idx);
-
-		if (IS_ENABLED(CONFIG_BT_MESH_GATT_PROXY)) {
-			if (node_id) {
-				bt_mesh_proxy_identity_start(sub);
-			} else {
-				bt_mesh_proxy_identity_stop(sub);
-			}
-			bt_mesh_adv_update();
-		}
-
-		net_buf_simple_add_u8(&msg, sub->node_id);
+	status = bt_mesh_subnet_node_id_set(idx, node_id);
+	if (status == STATUS_INVALID_NETKEY) {
+		send_node_id_status(model, ctx, status, idx,
+				    BT_MESH_NODE_IDENTITY_STOPPED);
+		return;
 	}
 
-	if (bt_mesh_model_send(model, ctx, &msg, NULL, NULL)) {
-		BT_ERR("Unable to send Node Identity Status");
+	if (status == STATUS_FEAT_NOT_SUPP) {
+		/* Should return success, even if feature isn't supported: */
+		send_node_id_status(model, ctx, STATUS_SUCCESS, idx,
+				    BT_MESH_NODE_IDENTITY_NOT_SUPPORTED);
+		return;
 	}
+
+	send_node_id_status(model, ctx, status, idx, node_id);
 }
 
 static void create_mod_app_status(struct net_buf_simple *msg,
@@ -2388,7 +2105,7 @@ static void send_krp_status(struct bt_mesh_model *model,
 static void krp_get(struct bt_mesh_model *model, struct bt_mesh_msg_ctx *ctx,
 		    struct net_buf_simple *buf)
 {
-	struct bt_mesh_subnet *sub;
+	const struct bt_mesh_subnet *sub;
 	uint16_t idx;
 
 	idx = net_buf_simple_pull_le16(buf);
@@ -2402,18 +2119,18 @@ static void krp_get(struct bt_mesh_model *model, struct bt_mesh_msg_ctx *ctx,
 	sub = bt_mesh_subnet_get(idx);
 	if (!sub) {
 		send_krp_status(model, ctx, idx, 0x00, STATUS_INVALID_NETKEY);
-	} else {
-		send_krp_status(model, ctx, idx, sub->kr_phase,
-				STATUS_SUCCESS);
+		return;
 	}
+
+	send_krp_status(model, ctx, idx, sub->kr_phase, STATUS_SUCCESS);
 }
 
 static void krp_set(struct bt_mesh_model *model, struct bt_mesh_msg_ctx *ctx,
 		    struct net_buf_simple *buf)
 {
-	struct bt_mesh_subnet *sub;
 	uint8_t phase;
 	uint16_t idx;
+	int err;
 
 	idx = net_buf_simple_pull_le16(buf);
 	phase = net_buf_simple_pull_u8(buf);
@@ -2423,42 +2140,20 @@ static void krp_set(struct bt_mesh_model *model, struct bt_mesh_msg_ctx *ctx,
 		return;
 	}
 
-	BT_DBG("idx 0x%04x transition 0x%02x", idx, phase);
+	err = bt_mesh_subnet_kr_phase_set(idx, &phase);
+	if (err == -EINVAL) {
+		BT_ERR("Invalid kr phase transition 0x%02x", phase);
+		return;
+	}
 
-	sub = bt_mesh_subnet_get(idx);
-	if (!sub) {
+	if (err == -ENOENT) {
 		send_krp_status(model, ctx, idx, 0x00, STATUS_INVALID_NETKEY);
 		return;
 	}
 
-	BT_DBG("%u -> %u", sub->kr_phase, phase);
+	BT_DBG("idx 0x%04x transition 0x%02x", idx, phase);
 
-	if (phase < BT_MESH_KR_PHASE_2 || phase > BT_MESH_KR_PHASE_3 ||
-	    (sub->kr_phase == BT_MESH_KR_NORMAL &&
-	     phase == BT_MESH_KR_PHASE_2)) {
-		BT_WARN("Prohibited transition %u -> %u", sub->kr_phase, phase);
-		return;
-	}
-
-	if (sub->kr_phase == BT_MESH_KR_PHASE_1 &&
-	    phase == BT_MESH_KR_PHASE_2) {
-		sub->kr_phase = BT_MESH_KR_PHASE_2;
-		sub->kr_flag = 1;
-		bt_mesh_net_beacon_update(sub);
-	} else if ((sub->kr_phase == BT_MESH_KR_PHASE_1 ||
-		    sub->kr_phase == BT_MESH_KR_PHASE_2) &&
-		   phase == BT_MESH_KR_PHASE_3) {
-		bt_mesh_net_revoke_keys(sub);
-		if (IS_ENABLED(CONFIG_BT_MESH_LOW_POWER) ||
-		    IS_ENABLED(CONFIG_BT_MESH_FRIEND)) {
-			friend_cred_refresh(ctx->net_idx);
-		}
-		sub->kr_phase = BT_MESH_KR_NORMAL;
-		sub->kr_flag = 0;
-		bt_mesh_net_beacon_update(sub);
-	}
-
-	send_krp_status(model, ctx, idx, sub->kr_phase, STATUS_SUCCESS);
+	send_krp_status(model, ctx, idx, phase, STATUS_SUCCESS);
 }
 
 static uint8_t hb_pub_count_log(uint16_t val)
@@ -2750,6 +2445,8 @@ static int cfg_srv_init(struct bt_mesh_model *model)
 	 */
 	model->keys[0] = BT_MESH_KEY_DEV_LOCAL;
 
+	bt_mesh_app_key_cb_register(&app_key_cb);
+
 	return 0;
 }
 
@@ -2787,53 +2484,7 @@ static void mod_reset(struct bt_mesh_model *mod, struct bt_mesh_elem *elem,
 
 void bt_mesh_cfg_reset(void)
 {
-	int i;
-
 	BT_DBG("");
 
-	/* Delete all net keys, which also takes care of all app keys which
-	 * are associated with each net key.
-	 */
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-		struct bt_mesh_subnet *sub = &bt_mesh.sub[i];
-
-		if (sub->net_idx != BT_MESH_KEY_UNUSED) {
-			bt_mesh_subnet_del(sub, true);
-		}
-	}
-
 	bt_mesh_model_foreach(mod_reset, NULL);
-}
-
-void bt_mesh_subnet_del(struct bt_mesh_subnet *sub, bool store)
-{
-	struct bt_mesh_hb_pub hb_pub;
-	int i;
-
-	BT_DBG("NetIdx 0x%03x store %u", sub->net_idx, store);
-
-	bt_mesh_hb_pub_get(&hb_pub);
-	if (hb_pub.net_idx == sub->net_idx) {
-		bt_mesh_hb_pub_set(NULL);
-	}
-
-	/* Delete any app keys bound to this NetKey index */
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.app_keys); i++) {
-		struct bt_mesh_app_key *key = &bt_mesh.app_keys[i];
-
-		if (key->net_idx == sub->net_idx) {
-			bt_mesh_app_key_del(key, store);
-		}
-	}
-
-	if (IS_ENABLED(CONFIG_BT_MESH_FRIEND)) {
-		bt_mesh_friend_clear_net_idx(sub->net_idx);
-	}
-
-	if (IS_ENABLED(CONFIG_BT_SETTINGS) && store) {
-		bt_mesh_clear_subnet(sub);
-	}
-
-	(void)memset(sub, 0, sizeof(*sub));
-	sub->net_idx = BT_MESH_KEY_UNUSED;
 }

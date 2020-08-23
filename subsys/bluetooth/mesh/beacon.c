@@ -24,6 +24,7 @@
 #include "net.h"
 #include "prov.h"
 #include "crypto.h"
+#include "keys.h"
 #include "beacon.h"
 #include "foundation.h"
 
@@ -74,11 +75,11 @@ static void beacon_complete(int err, void *user_data)
 	sub->beacon_sent = k_uptime_get_32();
 }
 
-void bt_mesh_beacon_create(struct bt_mesh_subnet *sub,
+void bt_mesh_beacon_create(const struct bt_mesh_subnet *sub,
 			   struct net_buf_simple *buf)
 {
 	uint8_t flags = bt_mesh_net_flags(sub);
-	struct bt_mesh_subnet_keys *keys;
+	const struct bt_mesh_subnet_keys *keys;
 
 	net_buf_simple_add_u8(buf, BEACON_TYPE_SECURE);
 

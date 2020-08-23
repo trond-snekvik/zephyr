@@ -262,6 +262,9 @@ struct bt_mesh_net {
 	/* Timer to track duration in current IV Update state */
 	struct k_delayed_work ivu_timer;
 
+	sys_slist_t app_key_cbs; /* AppKey event handler callbacks */
+	sys_slist_t subnet_cbs; /* Subnet event handler callbacks */
+
 	uint8_t dev_key[16];
 
 	struct bt_mesh_app_key app_keys[CONFIG_BT_MESH_APP_KEY_COUNT];
@@ -281,7 +284,7 @@ enum bt_mesh_net_if {
 
 /* Decoding context for Network/Transport data */
 struct bt_mesh_net_rx {
-	struct bt_mesh_subnet *sub;
+	const struct bt_mesh_subnet *sub;
 	struct bt_mesh_msg_ctx ctx;
 	uint32_t  seq;            /* Sequence Number */
 	uint8_t   old_iv:1,       /* iv_index - 1 was used */
@@ -296,7 +299,7 @@ struct bt_mesh_net_rx {
 
 /* Encoding context for Network/Transport data */
 struct bt_mesh_net_tx {
-	struct bt_mesh_subnet *sub;
+	const struct bt_mesh_subnet *sub;
 	struct bt_mesh_msg_ctx *ctx;
 	uint16_t src;
 	uint8_t  xmit;
@@ -314,15 +317,10 @@ extern struct bt_mesh_net bt_mesh;
 
 #define BT_MESH_NET_HDR_LEN 9
 
-int bt_mesh_net_keys_create(struct bt_mesh_subnet_keys *keys,
-			    const uint8_t key[16]);
-
 int bt_mesh_net_create(uint16_t idx, uint8_t flags, const uint8_t key[16],
 		       uint32_t iv_index);
 
-uint8_t bt_mesh_net_flags(struct bt_mesh_subnet *sub);
-
-bool bt_mesh_kr_update(struct bt_mesh_subnet *sub, uint8_t new_kr, bool new_key);
+uint8_t bt_mesh_net_flags(const struct bt_mesh_subnet *sub);
 
 void bt_mesh_net_revoke_keys(struct bt_mesh_subnet *sub);
 
@@ -333,12 +331,6 @@ void bt_mesh_rpl_reset(void);
 bool bt_mesh_net_iv_update(uint32_t iv_index, bool iv_update);
 
 void bt_mesh_net_sec_update(struct bt_mesh_subnet *sub);
-
-struct bt_mesh_subnet *bt_mesh_subnet_get(uint16_t net_idx);
-
-struct bt_mesh_subnet *bt_mesh_subnet_find(const uint8_t net_id[8], uint8_t flags,
-					   uint32_t iv_index, const uint8_t auth[8],
-					   bool *new_key);
 
 int bt_mesh_net_encode(struct bt_mesh_net_tx *tx, struct net_buf_simple *buf,
 		       bool proxy);
@@ -375,12 +367,12 @@ struct friend_cred {
 	} cred[2];
 };
 
-int friend_cred_get(struct bt_mesh_subnet *sub, uint16_t addr, uint8_t *nid,
+int friend_cred_get(const struct bt_mesh_subnet *sub, uint16_t addr, uint8_t *nid,
 			    const uint8_t **enc, const uint8_t **priv);
 int friend_cred_set(struct friend_cred *cred, uint8_t idx, const uint8_t net_key[16]);
 void friend_cred_refresh(uint16_t net_idx);
-int friend_cred_update(struct bt_mesh_subnet *sub);
-struct friend_cred *friend_cred_create(struct bt_mesh_subnet *sub, uint16_t addr,
+int friend_cred_update(const struct bt_mesh_subnet *sub);
+struct friend_cred *friend_cred_create(const struct bt_mesh_subnet *sub, uint16_t addr,
 				       uint16_t lpn_counter, uint16_t frnd_counter);
 void friend_cred_clear(struct friend_cred *cred);
 int friend_cred_del(uint16_t net_idx, uint16_t addr);

@@ -22,6 +22,7 @@
 #include "adv.h"
 #include "mesh.h"
 #include "net.h"
+#include "keys.h"
 #include "transport.h"
 #include "heartbeat.h"
 #include "access.h"
@@ -485,7 +486,7 @@ int bt_mesh_lpn_friend_offer(struct bt_mesh_net_rx *rx,
 {
 	struct bt_mesh_ctl_friend_offer *msg = (void *)buf->data;
 	struct bt_mesh_lpn *lpn = &bt_mesh.lpn;
-	struct bt_mesh_subnet *sub = rx->sub;
+	const struct bt_mesh_subnet *sub = rx->sub;
 	struct friend_cred *cred;
 	uint16_t frnd_counter;
 	int err;
@@ -921,8 +922,8 @@ int bt_mesh_lpn_friend_update(struct bt_mesh_net_rx *rx,
 			      struct net_buf_simple *buf)
 {
 	struct bt_mesh_ctl_friend_update *msg = (void *)buf->data;
+	struct bt_mesh_subnet *sub = (struct bt_mesh_subnet *)rx->sub;
 	struct bt_mesh_lpn *lpn = &bt_mesh.lpn;
-	struct bt_mesh_subnet *sub = rx->sub;
 	uint32_t iv_index;
 
 	if (buf->len < sizeof(*msg)) {

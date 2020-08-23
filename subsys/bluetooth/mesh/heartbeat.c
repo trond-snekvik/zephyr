@@ -5,6 +5,7 @@
  */
 #include <bluetooth/mesh.h>
 #include "net.h"
+#include "keys.h"
 #include "access.h"
 #include "lpn.h"
 #include "settings.h"
@@ -138,7 +139,7 @@ static void hb_publish(struct k_work *work)
 		.start = hb_publish_start_cb,
 		.end = hb_publish_end_cb,
 	};
-	struct bt_mesh_subnet *sub;
+	const struct bt_mesh_subnet *sub;
 	int err;
 
 	BT_DBG("hb_pub.count: %u", pub.count);
