@@ -44,15 +44,9 @@ static struct k_delayed_work beacon_timer;
 
 static struct bt_mesh_subnet *cache_check(uint8_t data[21])
 {
-	int i;
+	struct bt_mesh_subnet *sub = NULL;
 
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-		struct bt_mesh_subnet *sub = &bt_mesh.sub[i];
-
-		if (sub->net_idx == BT_MESH_KEY_UNUSED) {
-			continue;
-		}
-
+	while ((sub = bt_mesh_subnet_next(sub))) {
 		if (!memcmp(sub->beacon_cache, data, 21)) {
 			return sub;
 		}
@@ -79,28 +73,22 @@ void bt_mesh_beacon_create(const struct bt_mesh_subnet *sub,
 			   struct net_buf_simple *buf)
 {
 	uint8_t flags = bt_mesh_net_flags(sub);
-	const struct bt_mesh_subnet_keys *keys;
+	const uint8_t *net_id = bt_mesh_subnet_id_get(sub);
 
 	net_buf_simple_add_u8(buf, BEACON_TYPE_SECURE);
-
-	if (sub->kr_flag) {
-		keys = &sub->keys[1];
-	} else {
-		keys = &sub->keys[0];
-	}
 
 	net_buf_simple_add_u8(buf, flags);
 
 	/* Network ID */
-	net_buf_simple_add_mem(buf, keys->net_id, 8);
+	net_buf_simple_add_mem(buf, net_id, 8);
 
 	/* IV Index */
 	net_buf_simple_add_be32(buf, bt_mesh.iv_index);
 
 	net_buf_simple_add_mem(buf, sub->auth, 8);
 
-	BT_DBG("net_idx 0x%04x flags 0x%02x NetID %s", sub->net_idx,
-	       flags, bt_hex(keys->net_id, 8));
+	BT_DBG("net_idx 0x%04x flags 0x%02x NetID %s", sub->net_idx, flags,
+	       bt_hex(net_id, 8));
 	BT_DBG("IV Index 0x%08x Auth %s", bt_mesh.iv_index,
 	       bt_hex(sub->auth, 8));
 }
@@ -114,19 +102,14 @@ static int secure_beacon_send(void)
 	static const struct bt_mesh_send_cb send_cb = {
 		.end = beacon_complete,
 	};
+	struct bt_mesh_subnet *sub = NULL;
 	uint32_t now = k_uptime_get_32();
-	int i;
 
 	BT_DBG("");
 
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-		struct bt_mesh_subnet *sub = &bt_mesh.sub[i];
+	while ((sub = bt_mesh_subnet_next(sub))) {
 		struct net_buf *buf;
 		uint32_t time_diff;
-
-		if (sub->net_idx == BT_MESH_KEY_UNUSED) {
-			continue;
-		}
 
 		time_diff = now - sub->beacon_sent;
 		if (time_diff < (600 * MSEC_PER_SEC) &&
@@ -242,8 +225,8 @@ static void unprovisioned_beacon_recv(struct net_buf_simple *buf)
 
 static void update_beacon_observation(void)
 {
+	struct bt_mesh_subnet *sub = NULL;
 	static bool first_half;
-	int i;
 
 	/* Observation period is 20 seconds, whereas the beacon timer
 	 * runs every 10 seconds. We process what's happened during the
@@ -254,13 +237,7 @@ static void update_beacon_observation(void)
 		return;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-		struct bt_mesh_subnet *sub = &bt_mesh.sub[i];
-
-		if (sub->net_idx == BT_MESH_KEY_UNUSED) {
-			continue;
-		}
-
+	while ((sub = bt_mesh_subnet_next(sub))) {
 		sub->beacons_last = sub->beacons_cur;
 		sub->beacons_cur = 0U;
 	}
@@ -415,20 +392,14 @@ void bt_mesh_beacon_ivu_initiator(bool enable)
 
 void bt_mesh_beacon_enable(void)
 {
-	int i;
+	struct bt_mesh_subnet *sub = NULL;
 
 	if (!bt_mesh_is_provisioned()) {
 		k_work_submit(&beacon_timer.work);
 		return;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-		struct bt_mesh_subnet *sub = &bt_mesh.sub[i];
-
-		if (sub->net_idx == BT_MESH_KEY_UNUSED) {
-			continue;
-		}
-
+	while ((sub = bt_mesh_subnet_next(sub))) {
 		sub->beacons_last = 0U;
 		sub->beacons_cur = 0U;
 

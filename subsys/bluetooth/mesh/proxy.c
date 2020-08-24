@@ -21,6 +21,7 @@
 
 #include "mesh.h"
 #include "adv.h"
+#include "keys.h"
 #include "net.h"
 #include "prov.h"
 #include "beacon.h"
@@ -347,25 +348,24 @@ static void proxy_send_beacons(struct k_work *work)
 	}
 }
 
-void bt_mesh_proxy_beacon_send(struct bt_mesh_subnet *sub)
+static void proxy_beacon_send(struct bt_mesh_subnet *sub, void *cb_data)
 {
 	int i;
-
-	if (!sub) {
-		/* NULL means we send on all subnets */
-		for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-			if (bt_mesh.sub[i].net_idx != BT_MESH_KEY_UNUSED) {
-				bt_mesh_proxy_beacon_send(&bt_mesh.sub[i]);
-			}
-		}
-
-		return;
-	}
 
 	for (i = 0; i < ARRAY_SIZE(clients); i++) {
 		if (clients[i].conn) {
 			beacon_send(clients[i].conn, sub);
 		}
+	}
+}
+
+void bt_mesh_proxy_beacon_send(struct bt_mesh_subnet *sub)
+{
+	if (sub) {
+		proxy_beacon_send(sub, NULL);
+	} else {
+		/* NULL means we send on all subnets */
+		bt_mesh_subnet_foreach(proxy_beacon_send, NULL);
 	}
 }
 

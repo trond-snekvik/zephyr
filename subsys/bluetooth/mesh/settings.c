@@ -2065,13 +2065,13 @@ void bt_mesh_clear_subnet(struct bt_mesh_subnet *sub)
 	schedule_store(BT_MESH_KEYS_PENDING);
 }
 
-void bt_mesh_clear_app_key(struct bt_mesh_app_key *key)
+void bt_mesh_clear_app_key(struct bt_mesh_app *app)
 {
 	struct key_update *update, *free_slot;
 
-	BT_DBG("AppKeyIndex 0x%03x", key->app_idx);
+	BT_DBG("AppKeyIndex 0x%03x", app->app_idx);
 
-	update = key_update_find(true, key->app_idx, &free_slot);
+	update = key_update_find(true, app->app_idx, &free_slot);
 	if (update) {
 		update->clear = 1U;
 		schedule_store(BT_MESH_KEYS_PENDING);
@@ -2079,12 +2079,12 @@ void bt_mesh_clear_app_key(struct bt_mesh_app_key *key)
 	}
 
 	if (!free_slot) {
-		clear_app_key(key->app_idx);
+		clear_app_key(app->app_idx);
 		return;
 	}
 
 	free_slot->valid = 1U;
-	free_slot->key_idx = key->app_idx;
+	free_slot->key_idx = app->app_idx;
 	free_slot->app_key = 1U;
 	free_slot->clear = 1U;
 

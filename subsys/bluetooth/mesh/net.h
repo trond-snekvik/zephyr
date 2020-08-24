@@ -23,55 +23,12 @@
 				    CONFIG_BT_MESH_IVU_DIVIDER)
 #define BT_MESH_IVU_TIMEOUT        K_HOURS(BT_MESH_IVU_HOURS)
 
-struct bt_mesh_app_key {
-	uint16_t net_idx;
-	uint16_t app_idx;
-	bool  updated;
-	struct bt_mesh_app_keys {
-		uint8_t id;
-		uint8_t val[16];
-	} keys[2];
-};
 
 struct bt_mesh_node {
 	uint16_t addr;
 	uint16_t net_idx;
 	uint8_t  dev_key[16];
 	uint8_t  num_elem;
-};
-
-struct bt_mesh_subnet {
-	uint32_t beacon_sent;        /* Timestamp of last sent beacon */
-	uint8_t  beacons_last;       /* Number of beacons during last
-				   * observation window
-				   */
-	uint8_t  beacons_cur;        /* Number of beaconds observed during
-				   * currently ongoing window.
-				   */
-
-	uint8_t  beacon_cache[21];   /* Cached last authenticated beacon */
-
-	uint16_t net_idx;            /* NetKeyIndex */
-
-	bool  kr_flag;            /* Key Refresh Flag */
-	uint8_t  kr_phase;           /* Key Refresh Phase */
-
-	uint8_t  node_id;            /* Node Identity State */
-	uint32_t node_id_start;      /* Node Identity started timestamp */
-
-	uint8_t  auth[8];            /* Beacon Authentication Value */
-
-	struct bt_mesh_subnet_keys {
-		uint8_t net[16];       /* NetKey */
-		uint8_t nid;           /* NID */
-		uint8_t enc[16];       /* EncKey */
-		uint8_t net_id[8];     /* Network ID */
-#if defined(CONFIG_BT_MESH_GATT_PROXY)
-		uint8_t identity[16];  /* IdentityKey */
-#endif
-		uint8_t privacy[16];   /* PrivacyKey */
-		uint8_t beacon[16];    /* BeaconKey */
-	} keys[2];
 };
 
 struct bt_mesh_rpl {
@@ -262,15 +219,6 @@ struct bt_mesh_net {
 	/* Timer to track duration in current IV Update state */
 	struct k_delayed_work ivu_timer;
 
-	sys_slist_t app_key_cbs; /* AppKey event handler callbacks */
-	sys_slist_t subnet_cbs; /* Subnet event handler callbacks */
-
-	uint8_t dev_key[16];
-
-	struct bt_mesh_app_key app_keys[CONFIG_BT_MESH_APP_KEY_COUNT];
-
-	struct bt_mesh_subnet sub[CONFIG_BT_MESH_SUBNET_COUNT];
-
 	struct bt_mesh_rpl rpl[CONFIG_BT_MESH_CRPL];
 };
 
@@ -284,7 +232,7 @@ enum bt_mesh_net_if {
 
 /* Decoding context for Network/Transport data */
 struct bt_mesh_net_rx {
-	const struct bt_mesh_subnet *sub;
+	struct bt_mesh_subnet *sub;
 	struct bt_mesh_msg_ctx ctx;
 	uint32_t  seq;            /* Sequence Number */
 	uint8_t   old_iv:1,       /* iv_index - 1 was used */
@@ -299,7 +247,7 @@ struct bt_mesh_net_rx {
 
 /* Encoding context for Network/Transport data */
 struct bt_mesh_net_tx {
-	const struct bt_mesh_subnet *sub;
+	struct bt_mesh_subnet *sub;
 	struct bt_mesh_msg_ctx *ctx;
 	uint16_t src;
 	uint8_t  xmit;
@@ -321,10 +269,6 @@ int bt_mesh_net_create(uint16_t idx, uint8_t flags, const uint8_t key[16],
 		       uint32_t iv_index);
 
 uint8_t bt_mesh_net_flags(const struct bt_mesh_subnet *sub);
-
-void bt_mesh_net_revoke_keys(struct bt_mesh_subnet *sub);
-
-int bt_mesh_net_beacon_update(struct bt_mesh_subnet *sub);
 
 void bt_mesh_rpl_reset(void);
 

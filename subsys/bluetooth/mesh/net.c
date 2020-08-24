@@ -77,16 +77,6 @@ static uint16_t msg_cache_next;
 /* Singleton network context (the implementation only supports one) */
 struct bt_mesh_net bt_mesh = {
 	.local_queue = SYS_SLIST_STATIC_INIT(&bt_mesh.local_queue),
-	.sub = {
-		[0 ... (CONFIG_BT_MESH_SUBNET_COUNT - 1)] = {
-			.net_idx = BT_MESH_KEY_UNUSED,
-		}
-	},
-	.app_keys = {
-		[0 ... (CONFIG_BT_MESH_APP_KEY_COUNT - 1)] = {
-			.net_idx = BT_MESH_KEY_UNUSED,
-		}
-	},
 };
 
 static uint32_t dup_cache[CONFIG_BT_MESH_MSG_CACHE_SIZE];
@@ -337,25 +327,6 @@ uint8_t bt_mesh_net_flags(const struct bt_mesh_subnet *sub)
 	return flags;
 }
 
-int bt_mesh_net_beacon_update(struct bt_mesh_subnet *sub)
-{
-	uint8_t flags = bt_mesh_net_flags(sub);
-	const struct bt_mesh_subnet_keys *keys;
-
-	if (sub->kr_flag) {
-		BT_DBG("NetIndex %u Using new key", sub->net_idx);
-		keys = &sub->keys[1];
-	} else {
-		BT_DBG("NetIndex %u Using current key", sub->net_idx);
-		keys = &sub->keys[0];
-	}
-
-	BT_DBG("flags 0x%02x, IVI 0x%08x", flags, bt_mesh.iv_index);
-
-	return bt_mesh_beacon_auth(keys->beacon, flags, keys->net_id,
-				   bt_mesh.iv_index, sub->auth);
-}
-
 int bt_mesh_net_create(uint16_t idx, uint8_t flags, const uint8_t key[16],
 		       uint32_t iv_index)
 {
@@ -384,50 +355,6 @@ int bt_mesh_net_create(uint16_t idx, uint8_t flags, const uint8_t key[16],
 		return bt_mesh_subnet_set(idx, false, BT_MESH_KR_NORMAL, key,
 					  NULL);
 	}
-}
-
-bool bt_mesh_kr_update(struct bt_mesh_subnet *sub, uint8_t new_kr, bool new_key)
-{
-	if (new_kr != sub->kr_flag && sub->kr_phase == BT_MESH_KR_NORMAL) {
-		BT_WARN("KR change in normal operation. Are we blacklisted?");
-		return false;
-	}
-
-	sub->kr_flag = new_kr;
-
-	if (sub->kr_flag) {
-		if (sub->kr_phase == BT_MESH_KR_PHASE_1) {
-			BT_DBG("Phase 1 -> Phase 2");
-			sub->kr_phase = BT_MESH_KR_PHASE_2;
-			return true;
-		}
-	} else {
-		switch (sub->kr_phase) {
-		case BT_MESH_KR_PHASE_1:
-			if (!new_key) {
-				/* Ignore */
-				break;
-			}
-		/* Upon receiving a Secure Network beacon with the KR flag set
-		 * to 0 using the new NetKey in Phase 1, the node shall
-		 * immediately transition to Phase 3, which effectively skips
-		 * Phase 2.
-		 *
-		 * Intentional fall-through.
-		 */
-		case BT_MESH_KR_PHASE_2:
-			BT_DBG("KR Phase 0x%02x -> Normal", sub->kr_phase);
-			bt_mesh_net_revoke_keys(sub);
-			if (IS_ENABLED(CONFIG_BT_MESH_LOW_POWER) ||
-			    IS_ENABLED(CONFIG_BT_MESH_FRIEND)) {
-				friend_cred_refresh(sub->net_idx);
-			}
-			sub->kr_phase = BT_MESH_KR_NORMAL;
-			return true;
-		}
-	}
-
-	return false;
 }
 
 void bt_mesh_rpl_reset(void)
