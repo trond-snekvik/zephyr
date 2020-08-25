@@ -6,6 +6,7 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include <bluetooth/mesh.h>
 #include "mesh.h"
 #include "net.h"
@@ -21,6 +22,20 @@
 #define BT_DBG_ENABLED IS_ENABLED(CONFIG_BT_MESH_DEBUG_KEYS)
 #define LOG_MODULE_NAME bt_mesh_keys
 #include "common/log.h"
+
+/* NetKey storage information */
+struct stored_subnet {
+	uint8_t kr_flag : 1,
+		kr_phase : 7;
+	uint8_t keys[2][16];
+} __packed;
+
+/* AppKey storage information */
+struct stored_app {
+	uint16_t net_idx;
+	bool     updated;
+	uint8_t  keys[2][16];
+} __packed;
 
 struct bt_mesh_subnet_keys {
 	uint8_t net[16];       /* NetKey */
@@ -144,7 +159,7 @@ static void app_key_del(struct app *app)
 	BT_DBG("AppIdx 0x%03x", app->state.app_idx);
 
 	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
-		bt_mesh_clear_app_key(app);
+		bt_mesh_clear_app_key(app->state.app_idx);
 	}
 
 	app_key_evt(app, BT_MESH_KEY_DELETED);
@@ -170,7 +185,7 @@ static void subnet_del(struct subnet *sub)
 	}
 
 	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
-		bt_mesh_clear_subnet(&sub->state);
+		bt_mesh_clear_subnet(sub->state.net_idx);
 	}
 
 	subnet_evt(sub, BT_MESH_KEY_DELETED);
@@ -255,13 +270,14 @@ static void net_keys_revoke(struct subnet *sub)
 	memcpy(&sub->keys[0], &sub->keys[1], sizeof(sub->keys[0]));
 	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
 		BT_DBG("Storing Updated NetKey persistently");
-		bt_mesh_store_subnet(sub);
+		bt_mesh_store_subnet(sub->state.net_idx);
 	}
 
 	for (i = 0; i < ARRAY_SIZE(apps); i++) {
 		struct app *app = &apps[i];
 
-		if (app->state.net_idx != sub->state.net_idx || !app->state.updated) {
+		if (app->state.net_idx != sub->state.net_idx ||
+		    !app->state.updated) {
 			continue;
 		}
 
@@ -269,7 +285,7 @@ static void net_keys_revoke(struct subnet *sub)
 		app->state.updated = false;
 		if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
 			BT_DBG("Storing Updated AppKey persistently");
-			bt_mesh_store_app_key(app);
+			bt_mesh_store_app_key(app->state.app_idx);
 		}
 	}
 }
@@ -303,7 +319,7 @@ bt_mesh_status_t bt_mesh_subnet_add(uint16_t idx, const uint8_t key[16])
 
 	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
 		BT_DBG("Storing NetKey persistently");
-		bt_mesh_store_subnet(sub);
+		bt_mesh_store_subnet(sub->state.net_idx);
 	}
 
 	/* Make sure we have valid beacon data to be sent */
@@ -373,10 +389,10 @@ bt_mesh_status_t bt_mesh_subnet_update(uint16_t idx, const uint8_t key[16])
 
 	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
 		BT_DBG("Storing NetKey persistently");
-		bt_mesh_store_subnet(&sub->state);
+		bt_mesh_store_subnet(sub->state.net_idx);
 	}
 
-	bt_mesh_net_beacon_update(&sub->state); // TODO: Convert to callback? Or remove? The kr_flag state is unchanged.
+	bt_mesh_net_beacon_update(&sub->state); // TODO: Convert to callback?
 
 	return STATUS_SUCCESS;
 }
@@ -667,7 +683,7 @@ bt_mesh_status_t bt_mesh_app_key_add(uint16_t app_idx, uint16_t net_idx,
 
 	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
 		BT_DBG("Storing AppKey persistently");
-		bt_mesh_store_app_key(app);
+		bt_mesh_store_app_key(app->state.app_idx);
 	}
 
 	app_key_evt(app, BT_MESH_KEY_ADDED);
@@ -738,7 +754,7 @@ bt_mesh_status_t bt_mesh_app_key_update(uint16_t app_idx, uint16_t net_idx,
 
 	if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
 		BT_DBG("Storing AppKey persistently");
-		bt_mesh_store_app_key(app);
+		bt_mesh_store_app_key(app->state.app_idx);
 	}
 
 	app_key_evt(app, BT_MESH_KEY_UPDATED);
@@ -773,8 +789,8 @@ bt_mesh_status_t bt_mesh_app_key_del(uint16_t app_idx, uint16_t net_idx)
 	return STATUS_SUCCESS;
 }
 
-int bt_mesh_app_key_set(uint16_t app_idx, uint16_t net_idx,
-			const uint8_t old_key[16], const uint8_t new_key[16])
+static int app_set(uint16_t app_idx, uint16_t net_idx,
+		   const uint8_t old_key[16], const uint8_t new_key[16])
 {
 	struct app *app;
 
@@ -1025,4 +1041,81 @@ struct bt_mesh_app *bt_mesh_app_next(uint16_t net_idx, struct bt_mesh_app *prev)
 	}
 
 	return NULL;
+}
+
+int bt_mesh_subnet_load(uint16_t net_idx, size_t len_rd,
+			settings_read_cb read_cb, void *cb_arg)
+{
+	struct stored_subnet value;
+
+	if (!len_rd) {
+		return 0;
+	}
+
+	len_rd = read_cb(cb_arg, &value, sizeof(value));
+	if (len_rd != sizeof(value)) {
+		return -EINVAL;
+	}
+
+	return bt_mesh_subnet_set(
+		net_idx, value.kr_flag, value.kr_phase, value.keys[0],
+		(value.kr_phase != BT_MESH_KR_NORMAL) ? value.keys[1] : NULL);
+}
+
+int bt_mesh_app_load(uint16_t app_idx, size_t len_rd, settings_read_cb read_cb,
+		     void *cb_arg)
+{
+	struct stored_app value;
+
+	if (!len_rd) {
+		return 0;
+	}
+
+	len_rd = read_cb(cb_arg, &value, sizeof(value));
+	if (len_rd != sizeof(value)) {
+		return -EINVAL;
+	}
+
+	return app_set(app_idx, value.net_idx, value.keys[0],
+		       value.updated ? value.keys[1] : NULL);
+}
+
+int bt_mesh_subnet_store(uint16_t net_idx, const char *path)
+{
+	const struct subnet *sub;
+
+	sub = subnet_get(net_idx);
+	if (!sub) {
+		return -ENOENT;
+	}
+
+	struct stored_subnet value = {
+		.kr_flag = sub->state.kr_flag,
+		.kr_phase = sub->state.kr_phase,
+	};
+
+	memcpy(value.keys[0], sub->keys[0].net, 16);
+	memcpy(value.keys[1], sub->keys[1].net, 16);
+
+	return settings_save_one(path, &value, sizeof(value));
+}
+
+int bt_mesh_app_store(uint16_t app_idx, const char *path)
+{
+	const struct app *app;
+
+	app = app_get(app_idx);
+	if (!app) {
+		return -ENOENT;
+	}
+
+	struct stored_app value = {
+		.net_idx = app->state.net_idx,
+		.updated = app->state.updated,
+	};
+
+	memcpy(value.keys[0], app->keys[0].val, 16);
+	memcpy(value.keys[1], app->keys[1].val, 16);
+
+	return settings_save_one(path, &value, sizeof(value));
 }

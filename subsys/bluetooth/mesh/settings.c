@@ -354,7 +354,6 @@ static int rpl_set(const char *name, size_t len_rd,
 static int net_key_set(const char *name, size_t len_rd,
 		       settings_read_cb read_cb, void *cb_arg)
 {
-	struct net_key_val key;
 	uint16_t net_idx;
 	int err;
 
@@ -363,23 +362,11 @@ static int net_key_set(const char *name, size_t len_rd,
 		return -ENOENT;
 	}
 
-	if (len_rd == 0) {
-		return 0;
-	}
-
 	net_idx = strtol(name, NULL, 16);
 
-	err = mesh_x_set(read_cb, cb_arg, &key, sizeof(key));
+	err = bt_mesh_subnet_load(net_idx, len_rd, read_cb, cb_arg);
 	if (err) {
 		BT_ERR("Failed to set \'net-key\'");
-		return err;
-	}
-
-	err = bt_mesh_subnet_set(
-		net_idx, key.kr_flag, key.kr_phase, key.val[0],
-		(key.kr_phase != BT_MESH_KR_NORMAL) ? key.val[1] : NULL);
-	if (err) {
-		BT_ERR("No space to allocate a new subnet");
 		return err;
 	}
 
@@ -391,7 +378,6 @@ static int net_key_set(const char *name, size_t len_rd,
 static int app_key_set(const char *name, size_t len_rd,
 		       settings_read_cb read_cb, void *cb_arg)
 {
-	struct app_key_val key;
 	uint16_t app_idx;
 	int err;
 
@@ -406,17 +392,10 @@ static int app_key_set(const char *name, size_t len_rd,
 
 	app_idx = strtol(name, NULL, 16);
 
-	err = mesh_x_set(read_cb, cb_arg, &key, sizeof(key));
+	err = bt_mesh_app_load(app_idx, len_rd, read_cb, cb_arg);
 	if (err) {
 		BT_ERR("Failed to set \'app-key\'");
 		return err;
-	}
-
-	err = bt_mesh_app_key_set(app_idx, key.net_idx, key.val[0],
-				  key.updated ? key.val[1] : NULL);
-	if (err) {
-		BT_ERR("No space for a new app key");
-		return -ENOMEM;
 	}
 
 	BT_DBG("AppKeyIndex 0x%03x recovered from storage", app_idx);
@@ -1034,8 +1013,6 @@ static void commit_mod(struct bt_mesh_model *mod, struct bt_mesh_elem *elem,
 
 static int mesh_commit(void)
 {
-	BT_DBG("sub[0].net_idx 0x%03x", bt_mesh.sub[0].net_idx);
-
 	if (bt_mesh.sub[0].net_idx == BT_MESH_KEY_UNUSED) {
 		/* Nothing to do since we're not yet provisioned */
 		return 0;
@@ -1355,23 +1332,16 @@ static void clear_net_key(uint16_t net_idx)
 	}
 }
 
-static void store_net_key(const struct bt_mesh_subnet *sub)
+static void store_subnet(uint16_t net_idx)
 {
-	struct net_key_val key;
 	char path[20];
 	int err;
 
-	BT_DBG("NetKeyIndex 0x%03x NetKey %s", sub->net_idx,
-	       bt_hex(sub->keys[0].net, 16));
+	BT_DBG("NetKeyIndex 0x%03x", net_idx);
 
-	memcpy(&key.val[0], sub->keys[0].net, 16);
-	memcpy(&key.val[1], sub->keys[1].net, 16);
-	key.kr_flag = sub->kr_flag;
-	key.kr_phase = sub->kr_phase;
+	snprintk(path, sizeof(path), "bt/mesh/NetKey/%x", net_idx);
 
-	snprintk(path, sizeof(path), "bt/mesh/NetKey/%x", sub->net_idx);
-
-	err = settings_save_one(path, &key, sizeof(key));
+	err = bt_mesh_subnet_store(net_idx, path);
 	if (err) {
 		BT_ERR("Failed to store NetKey value");
 	} else {
@@ -1379,20 +1349,14 @@ static void store_net_key(const struct bt_mesh_subnet *sub)
 	}
 }
 
-static void store_app_key(const struct bt_mesh_app_key *app)
+static void store_app(uint16_t app_idx)
 {
-	struct app_key_val key;
 	char path[20];
 	int err;
 
-	key.net_idx = app->net_idx;
-	key.updated = app->updated;
-	memcpy(key.val[0], app->keys[0].val, 16);
-	memcpy(key.val[1], app->keys[1].val, 16);
+	snprintk(path, sizeof(path), "bt/mesh/AppKey/%x", app_idx);
 
-	snprintk(path, sizeof(path), "bt/mesh/AppKey/%x", app->app_idx);
-
-	err = settings_save_one(path, &key, sizeof(key));
+	err = bt_mesh_app_store(app_idx, path);
 	if (err) {
 		BT_ERR("Failed to store AppKey %s value", log_strdup(path));
 	} else {
@@ -1419,26 +1383,9 @@ static void store_pending_keys(void)
 			}
 		} else {
 			if (update->app_key) {
-				const struct bt_mesh_app_key *key;
-
-				key = bt_mesh_app_key_get(update->key_idx);
-				if (key) {
-					store_app_key(key);
-				} else {
-					BT_WARN("AppKeyIndex 0x%03x not found",
-					       update->key_idx);
-				}
-
+				store_app(update->key_idx);
 			} else {
-				const struct bt_mesh_subnet *sub;
-
-				sub = bt_mesh_subnet_get(update->key_idx);
-				if (sub) {
-					store_net_key(sub);
-				} else {
-					BT_WARN("NetKeyIndex 0x%03x not found",
-					       update->key_idx);
-				}
+				store_subnet(update->key_idx);
 			}
 		}
 
@@ -1970,13 +1917,13 @@ static struct key_update *key_update_find(bool app_key, uint16_t key_idx,
 	return match;
 }
 
-void bt_mesh_store_subnet(struct bt_mesh_subnet *sub)
+void bt_mesh_store_subnet(uint16_t net_idx)
 {
 	struct key_update *update, *free_slot;
 
-	BT_DBG("NetKeyIndex 0x%03x", sub->net_idx);
+	BT_DBG("NetKeyIndex 0x%03x", net_idx);
 
-	update = key_update_find(false, sub->net_idx, &free_slot);
+	update = key_update_find(false, net_idx, &free_slot);
 	if (update) {
 		update->clear = 0U;
 		schedule_store(BT_MESH_KEYS_PENDING);
@@ -1984,25 +1931,25 @@ void bt_mesh_store_subnet(struct bt_mesh_subnet *sub)
 	}
 
 	if (!free_slot) {
-		store_net_key(sub);
+		store_subnet(net_idx);
 		return;
 	}
 
 	free_slot->valid = 1U;
-	free_slot->key_idx = sub->net_idx;
+	free_slot->key_idx = net_idx;
 	free_slot->app_key = 0U;
 	free_slot->clear = 0U;
 
 	schedule_store(BT_MESH_KEYS_PENDING);
 }
 
-void bt_mesh_store_app_key(struct bt_mesh_app_key *key)
+void bt_mesh_store_app_key(uint16_t app_idx)
 {
 	struct key_update *update, *free_slot;
 
-	BT_DBG("AppKeyIndex 0x%03x", key->app_idx);
+	BT_DBG("AppKeyIndex 0x%03x", app_idx);
 
-	update = key_update_find(true, key->app_idx, &free_slot);
+	update = key_update_find(true, app_idx, &free_slot);
 	if (update) {
 		update->clear = 0U;
 		schedule_store(BT_MESH_KEYS_PENDING);
@@ -2010,12 +1957,12 @@ void bt_mesh_store_app_key(struct bt_mesh_app_key *key)
 	}
 
 	if (!free_slot) {
-		store_app_key(key);
+		store_app(app_idx);
 		return;
 	}
 
 	free_slot->valid = 1U;
-	free_slot->key_idx = key->app_idx;
+	free_slot->key_idx = app_idx;
 	free_slot->app_key = 1U;
 	free_slot->clear = 0U;
 
@@ -2039,13 +1986,13 @@ void bt_mesh_clear_net(void)
 	schedule_store(BT_MESH_CFG_PENDING);
 }
 
-void bt_mesh_clear_subnet(struct bt_mesh_subnet *sub)
+void bt_mesh_clear_subnet(uint16_t net_idx)
 {
 	struct key_update *update, *free_slot;
 
-	BT_DBG("NetKeyIndex 0x%03x", sub->net_idx);
+	BT_DBG("NetKeyIndex 0x%03x", net_idx);
 
-	update = key_update_find(false, sub->net_idx, &free_slot);
+	update = key_update_find(false, net_idx, &free_slot);
 	if (update) {
 		update->clear = 1U;
 		schedule_store(BT_MESH_KEYS_PENDING);
@@ -2053,25 +2000,25 @@ void bt_mesh_clear_subnet(struct bt_mesh_subnet *sub)
 	}
 
 	if (!free_slot) {
-		clear_net_key(sub->net_idx);
+		clear_net_key(net_idx);
 		return;
 	}
 
 	free_slot->valid = 1U;
-	free_slot->key_idx = sub->net_idx;
+	free_slot->key_idx = net_idx;
 	free_slot->app_key = 0U;
 	free_slot->clear = 1U;
 
 	schedule_store(BT_MESH_KEYS_PENDING);
 }
 
-void bt_mesh_clear_app_key(struct bt_mesh_app *app)
+void bt_mesh_clear_app_key(uint16_t app_idx)
 {
 	struct key_update *update, *free_slot;
 
-	BT_DBG("AppKeyIndex 0x%03x", app->app_idx);
+	BT_DBG("AppKeyIndex 0x%03x", app_idx);
 
-	update = key_update_find(true, app->app_idx, &free_slot);
+	update = key_update_find(true, app_idx, &free_slot);
 	if (update) {
 		update->clear = 1U;
 		schedule_store(BT_MESH_KEYS_PENDING);
@@ -2079,12 +2026,12 @@ void bt_mesh_clear_app_key(struct bt_mesh_app *app)
 	}
 
 	if (!free_slot) {
-		clear_app_key(app->app_idx);
+		clear_app_key(app_idx);
 		return;
 	}
 
 	free_slot->valid = 1U;
-	free_slot->key_idx = app->app_idx;
+	free_slot->key_idx = app_idx;
 	free_slot->app_key = 1U;
 	free_slot->clear = 1U;
 

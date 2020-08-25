@@ -81,8 +81,6 @@ struct bt_mesh_app *bt_mesh_app_get(uint16_t app_idx);
 
 int bt_mesh_subnet_set(uint16_t net_idx, bool kr, uint8_t krp,
 		       const uint8_t old_key[16], const uint8_t new_key[16]);
-int bt_mesh_app_key_set(uint16_t app_idx, uint16_t net_idx,
-			const uint8_t old_key[16], const uint8_t new_key[16]);
 
 int bt_mesh_keys_resolve(struct bt_mesh_msg_ctx *ctx,
 			 struct bt_mesh_subnet **sub,
@@ -94,9 +92,22 @@ const uint16_t *bt_mesh_app_idx_next(uint16_t net_idx, const uint16_t *prev);
 const uint16_t *bt_mesh_net_idx_next(const uint16_t *prev);
 int bt_mesh_net_beacon_update(struct bt_mesh_subnet *sub);
 
-void bt_mesh_subnet_foreach(void (*cb)(struct bt_mesh_subnet *sub, void *cb_data), void *cb_data);
-void bt_mesh_app_foreach(uint16_t net_idx, void (*cb)(struct bt_mesh_app *app, void *cb_data), void *cb_data);
+void bt_mesh_subnet_foreach(void (*cb)(struct bt_mesh_subnet *sub,
+				       void *cb_data),
+			    void *cb_data);
+void bt_mesh_app_foreach(uint16_t net_idx,
+			 void (*cb)(struct bt_mesh_app *app, void *cb_data),
+			 void *cb_data);
 const uint8_t *bt_mesh_subnet_id_get(const struct bt_mesh_subnet *sub);
 
 struct bt_mesh_subnet *bt_mesh_subnet_next(struct bt_mesh_subnet *prev);
-struct bt_mesh_app *bt_mesh_app_next(uint16_t net_idx, struct bt_mesh_app *prev);
+struct bt_mesh_app *bt_mesh_app_next(uint16_t net_idx,
+				     struct bt_mesh_app *prev);
+
+int bt_mesh_subnet_load(uint16_t net_idx, size_t len_rd,
+			settings_read_cb read_cb, void *cb_arg);
+int bt_mesh_app_load(uint16_t app_idx, size_t len_rd, settings_read_cb read_cb,
+		     void *cb_arg);
+
+int bt_mesh_subnet_store(uint16_t net_idx, const char *path);
+int bt_mesh_app_store(uint16_t app_idx, const char *path);
