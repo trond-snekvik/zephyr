@@ -1809,6 +1809,10 @@ static void store_pending_va(void)
 	uint16_t i;
 	int err;
 
+	if (!CONFIG_BT_MESH_LABEL_COUNT) {
+		return;
+	}
+
 	for (i = 0; (lab = bt_mesh_va_get(i)) != NULL; i++) {
 		if (!lab->changed) {
 			continue;

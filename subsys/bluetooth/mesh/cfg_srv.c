@@ -898,7 +898,8 @@ static size_t mod_sub_list_clear(struct bt_mesh_model *mod)
 
 	/* Unref stored labels related to this model */
 	for (i = 0, clear_count = 0; i < ARRAY_SIZE(mod->groups); i++) {
-		if (!BT_MESH_ADDR_IS_VIRTUAL(mod->groups[i])) {
+		if ((CONFIG_BT_MESH_LABEL_COUNT == 0) ||
+		    !BT_MESH_ADDR_IS_VIRTUAL(mod->groups[i])) {
 			if (mod->groups[i] != BT_MESH_ADDR_UNASSIGNED) {
 				mod->groups[i] = BT_MESH_ADDR_UNASSIGNED;
 				clear_count++;
@@ -965,15 +966,21 @@ static void mod_pub_va_set(struct bt_mesh_model *model,
 	if (!elem) {
 		mod = NULL;
 		vnd = (buf->len == 4U);
-		pub_addr = 0U;
+		pub_addr = BT_MESH_ADDR_UNASSIGNED;
 		status = STATUS_INVALID_ADDRESS;
 		goto send_status;
 	}
 
 	mod = get_model(elem, buf, &vnd);
 	if (!mod) {
-		pub_addr = 0U;
+		pub_addr = BT_MESH_ADDR_UNASSIGNED;
 		status = STATUS_INVALID_MODEL;
+		goto send_status;
+	}
+
+	if (!CONFIG_BT_MESH_LABEL_COUNT) {
+		pub_addr = BT_MESH_ADDR_UNASSIGNED;
+		status = STATUS_INSUFF_RESOURCES;
 		goto send_status;
 	}
 
@@ -1476,6 +1483,12 @@ static void mod_sub_va_add(struct bt_mesh_model *model,
 		goto send_status;
 	}
 
+	if (!CONFIG_BT_MESH_LABEL_COUNT) {
+		sub_addr = BT_MESH_ADDR_UNASSIGNED;
+		status = STATUS_INSUFF_RESOURCES;
+		goto send_status;
+	}
+
 	status = bt_mesh_va_add(label_uuid, &sub_addr);
 	if (status != STATUS_SUCCESS) {
 		goto send_status;
@@ -1554,6 +1567,12 @@ static void mod_sub_va_del(struct bt_mesh_model *model,
 		goto send_status;
 	}
 
+	if (!CONFIG_BT_MESH_LABEL_COUNT) {
+		sub_addr = BT_MESH_ADDR_UNASSIGNED;
+		status = STATUS_CANNOT_REMOVE;
+		goto send_status;
+	}
+
 	status = bt_mesh_va_del(label_uuid, &sub_addr);
 	if (sub_addr == BT_MESH_ADDR_UNASSIGNED) {
 		goto send_status;
@@ -1619,9 +1638,7 @@ static void mod_sub_va_overwrite(struct bt_mesh_model *model,
 		goto send_status;
 	}
 
-
-	if (ARRAY_SIZE(mod->groups) > 0) {
-
+	if ((CONFIG_BT_MESH_LABEL_COUNT > 0) && ARRAY_SIZE(mod->groups) > 0) {
 		status = bt_mesh_va_add(label_uuid, &sub_addr);
 		if (status == STATUS_SUCCESS) {
 			bt_mesh_model_tree_walk(bt_mesh_model_root(mod),

@@ -649,7 +649,8 @@ int bt_mesh_trans_send(struct bt_mesh_net_tx *tx, struct net_buf_simple *msg,
 		tx->aszmic = 1U;
 	}
 
-	if (BT_MESH_ADDR_IS_VIRTUAL(tx->ctx->addr)) {
+	if ((CONFIG_BT_MESH_LABEL_COUNT > 0) &&
+	    BT_MESH_ADDR_IS_VIRTUAL(tx->ctx->addr)) {
 		crypto.ad = bt_mesh_va_label_get(tx->ctx->addr);
 	}
 
@@ -733,7 +734,8 @@ static int sdu_recv(struct bt_mesh_net_rx *rx, uint8_t hdr, uint8_t aszmic,
 		return 0;
 	}
 
-	if (BT_MESH_ADDR_IS_VIRTUAL(rx->ctx.recv_dst)) {
+	if ((CONFIG_BT_MESH_LABEL_COUNT > 0) &&
+	    BT_MESH_ADDR_IS_VIRTUAL(rx->ctx.recv_dst)) {
 		ctx.crypto.ad = bt_mesh_va_label_get(rx->ctx.recv_dst);
 	}
 
@@ -1753,19 +1755,6 @@ uint8_t bt_mesh_va_del(uint8_t uuid[16], uint16_t *addr)
 
 	va_store(va);
 	return STATUS_SUCCESS;
-}
-
-struct bt_mesh_va *bt_mesh_va_find(uint8_t uuid[16])
-{
-	for (int i = 0; i < ARRAY_SIZE(virtual_addrs); i++) {
-		if (virtual_addrs[i].ref &&
-		    !memcmp(uuid, virtual_addrs[i].uuid,
-			    ARRAY_SIZE(virtual_addrs[i].uuid))) {
-			return &virtual_addrs[i];
-		}
-	}
-
-	return NULL;
 }
 
 uint8_t *bt_mesh_va_label_get(uint16_t addr)
