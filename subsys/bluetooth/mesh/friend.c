@@ -717,11 +717,6 @@ int bt_mesh_friend_poll(struct bt_mesh_net_rx *rx, struct net_buf_simple *buf)
 		}
 
 		frnd->fsn = msg->fsn;
-
-		if (sys_slist_is_empty(&frnd->queue)) {
-			enqueue_update(frnd, 0);
-			BT_DBG("Enqueued Friend Update to empty queue");
-		}
 	}
 
 	return 0;
@@ -1178,8 +1173,7 @@ static void friend_timeout(struct k_work *work)
 		.start = buf_send_start,
 		.end = buf_send_end,
 	};
-
-	uint8_t md;
+	int err;
 
 	__ASSERT_NO_MSG(frnd->pending_buf == 0U);
 
@@ -1198,29 +1192,49 @@ static void friend_timeout(struct k_work *work)
 		return;
 	}
 
-	frnd->last = (void *)sys_slist_get(&frnd->queue);
+	/* Messages for the LPN are stored in the friend queue without being
+	 * encrypted with the network key.
+	 *
+	 * Pull packets from the friend queue and encrypt them. If a packet
+	 * can't be encrypted for some reason, we'll drop it and try the next.
+	 * If the queue is empty, we'll send an update with more_data=false.
+	 */
+	while ((frnd->last = (void *)sys_slist_get(&frnd->queue))) {
+		frnd->queue_size--;
+
+		update_overwrite(frnd->last, frnd->queue_size > 0);
+
+		/* Clear the flag we use for segment tracking */
+		frnd->last->flags &= ~NET_BUF_FRAGS;
+		frnd->last->frags = NULL;
+
+		err = encrypt_friend_pdu(frnd, frnd->last, false);
+		if (err) {
+			BT_WARN("Net encrypt failed (err: %d)", err);
+			net_buf_unref(frnd->last);
+			continue;
+		}
+
+		BT_DBG("Sending buf %p from Friend Queue of LPN 0x%04x",
+		       frnd->last, frnd->lpn);
+		goto send_last;
+	}
+
+	BT_DBG("No more friend messages, sending update");
+
+	frnd->last = encode_update(frnd, false);
 	if (!frnd->last) {
-		BT_WARN("Friendship not established with 0x%04x",
-			frnd->lpn);
-		friend_clear(frnd);
+		BT_WARN("Unable to encode update for LPN 0x%04x", frnd->lpn);
 		return;
 	}
 
-	md = (uint8_t)(sys_slist_peek_head(&frnd->queue) != NULL);
-
-	update_overwrite(frnd->last, md);
-
-	if (encrypt_friend_pdu(frnd, frnd->last, false)) {
+	err = encrypt_friend_pdu(frnd, frnd->last, false);
+	if (err) {
+		BT_WARN("Unable to encrypt update for LPN 0x%04x", frnd->lpn);
+		net_buf_unref(frnd->last);
+		frnd->last = NULL;
 		return;
 	}
-
-	/* Clear the flag we use for segment tracking */
-	frnd->last->flags &= ~NET_BUF_FRAGS;
-	frnd->last->frags = NULL;
-
-	BT_DBG("Sending buf %p from Friend Queue of LPN 0x%04x",
-	       frnd->last, frnd->lpn);
-	frnd->queue_size--;
 
 send_last:
 	frnd->pending_req = 0U;
